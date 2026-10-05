@@ -3,13 +3,32 @@ local M = {phase="absent", keys={}, pending={}, settings=nil}
 local U = CS.UnityEngine
 local V, Q = U.Vector3, U.Quaternion
 local ID = "motorcycle"
+local LEGACY_DISMOUNT="F7" -- ZML_KEYBIND_DEFAULT
+local keyActions
+local function ensureKeys()
+    if keyActions then return end
+    require_ex("Common/Utils/UIUtils")
+    if not rawget(_G,"ZMLKeybinds") then require_ex("UI/Panels/GameSetting/GameSettingCtrl") end
+    local K=assert(rawget(_G,"ZMLKeybinds"),"keybinds library unavailable")
+    if K._attachGate then K._attachGate() end
+    assert(K.api==1 and K.version~="0.1.0","keybinds continuous input API unavailable")
+    local defs={{"dismount","摩托车 · 下车",LEGACY_DISMOUNT},{"jump","摩托车 · 跳跃","Space"},
+        {"forward","摩托车 · 前进","W"},{"reverse","摩托车 · 倒车","S"},
+        {"left","摩托车 · 左转","A"},{"right","摩托车 · 右转","D"},{"brake","摩托车 · 刹车","LeftControl"}}
+    local actions={}
+    for _,d in ipairs(defs) do
+        actions[d[1]]=K.find(ID,d[1]) or assert(K.register(ID,{id=d[1],name=d[2],primary=d[3],migrate=d[1]=="dismount"}))
+        assert(type(actions[d[1]].down)=="function" and type(actions[d[1]].pressed)=="function","keybinds API mismatch")
+    end
+    keyActions=actions
+end
 -- ZML_WHEEL_GEOMETRY_BEGIN
 -- Derived from our licensed model by tools/calibrate-bike.py, not game assets.
 local BIKE={rearRadius=.3189637154,frontRadius=.3189681663,
     rear=V(-.0255573198,.318983692,-.7003807752),front=V(.0255573198,.3189881429,.7810290642),
     steerPivot=V(.0114865946,.8442755938,.4628484249)}
 -- ZML_WHEEL_GEOMETRY_END
--- Steering follows the fork's inclined headstock, not a vertical yaw pivot.
+-- Steering rotates around inclined headstock axis
 local STEER_AXIS=V(0,BIKE.steerPivot.y-BIKE.front.y,BIKE.steerPivot.z-BIKE.front.z).normalized
 local function forkRotation(angle) return Q.AngleAxis(angle,STEER_AXIS) end
 local function turnGeometry(scale,angle)
@@ -45,7 +64,7 @@ local function notice(text) pcall(function() Notify(MessageConst.SHOW_TOAST,text
 local function report(event) if M.api then pcall(M.api.report,ID,event) end end
 local function warnEvent(event,err)
     report(event)
-    -- Own exception only, never player/config values or general account logs.
+    -- Report internal exception
     local detail=err and (": "..tostring(err):gsub("[%c]"," "):sub(1,512)) or ""
     -- Native logger exposes error/warn, not warning. warn is disabled in release.
     pcall(function() logger.error("ZML Motorcycle: "..event..detail) end)
@@ -59,8 +78,12 @@ end
 local function config()
     local v=assert(api().get(ID))
     local c={enabled=v.enabled=="true",scale=tonumber(v.scale),speed=tonumber(v.speed),
-        acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),speed_steer_reduction=tonumber(v.speed_steer_reduction),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),render_comparison=v.render_comparison=="true",
-        mount_key=v.mount_key}
+        acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),speed_steer_reduction=tonumber(v.speed_steer_reduction),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),
+        }
+    for _,key in ipairs({"terrain_grace","terrain_drop","jump_cooldown","jump_base_speed","jump_speed_boost","jump_pitch","jump_gravity","speed_fx_threshold","speed_fx_intensity","ride_fov","fov_blend"}) do
+        c[key]=assert(tonumber(v[key]),"riding configuration unavailable")
+    end
+    c.jump_enabled=v.jump_enabled=="true";c.speed_fx=v.speed_fx=="true"
     assert(c.scale and c.speed and c.acceleration and c.max_steer and c.max_steer>=10 and c.max_steer<=50 and c.speed_steer_reduction and c.speed_steer_reduction>=0 and c.speed_steer_reduction<=1 and c.seat_height and c.model_yaw,"configuration unavailable")
     return c
 end
@@ -83,16 +106,27 @@ local function gameAllowed(pc)
         not pc.blockPlayerInput and not pc.castingNormalAttack and not Utils.isInFight() and
         not Utils.isInThrowMode() and not Utils.isInCustomAbility()
 end
+-- Advance airborne timer in Tick
+local Flight
+local function rideTerrain(l,mover,dt)
+    if l.flight then return Flight.allowed(l,dt) end
+    local mode=CS.Beyond.Gameplay.Core.MovementComponent.MoveMode
+    local y=l.root.transform.position.y
+    if groundAllowed(mover) or (M.settings.terrain_grace>0 and mover.moveMode==mode.Landing) then
+        l.airTime=0;l.groundY=y;l.airborne=false;return true
+    end
+    local jumping=mover.moveMode==mode.Jumping and M.settings.jump_enabled
+    if not jumping and mover.moveMode~=mode.Falling then return false end
+    l.airborne=true;l.airTime=(l.airTime or 0)+(dt or 0)
+    return M.settings.terrain_grace>0 and l.airTime<=M.settings.terrain_grace and
+        (l.groundY or y)-y<=M.settings.terrain_drop
+end
 local function typing()
     local es=U.EventSystems.EventSystem.current
     if es==nil or not live(es.currentSelectedGameObject) then return false end
     local go=es.currentSelectedGameObject
     return go:GetComponent(typeof(CS.TMPro.TMP_InputField))~=nil or
         go:GetComponent(typeof(U.UI.InputField))~=nil
-end
-local function syncProbes()
-    local visible=M.settings and M.settings.render_comparison and M.phase~="mounted" and M.owner~=nil
-    for _,go in ipairs(M.probeRoots or {}) do go:SetActive(visible==true) end
 end
 local function setScale()
     if not M.visual then return end
@@ -103,7 +137,6 @@ local function setScale()
     M.visual.transform.localPosition=V(0,0,0)
     if M.collisionScale~=scale then M.collisionScale=scale;M.collisionArmed=nil end
     M.syncCollision()
-    syncProbes()
 end
 local function own(object)
     assert(object,"owned model resource unavailable")
@@ -125,13 +158,11 @@ local function destroyVehicle()
     M.collisionScale=nil
     -- Track even objects whose SetParent subsequently failed; no orphaned partial model.
     for i=#(M.objects or {}),1,-1 do pcall(U.Object.Destroy,M.objects[i]) end
-    -- Runtime-generated meshes/textures/material clones are not loader handles.
+    -- Dynamic mesh/texture/material clones
     for i=#(M.owned or {}),1,-1 do pcall(U.Object.Destroy,M.owned[i]) end
     M.objects,M.owned,M.parts,M.renderers,M.vehicle,M.visual,M.mesh=nil,nil,nil,nil,nil,nil,nil
     M.groundHits=nil
     M.groundQueryReported,M.rootGroundReported=nil,nil
-    M.visibilityFrames=nil
-    M.probeRoots,M.probeRenderers,M.probeCheck=nil,nil,nil
     if M.loader then pcall(function() M.loader:DisposeAllHandles() end) end
     M.loader=nil
     M.phase="absent"
@@ -158,24 +189,6 @@ local function visualTemplate()
     report("native_visual_template_ready")
     return selected
 end
--- Diagnostic handles are wrappers for a borrowed GPU allocation, not owned Meshes.
--- Unity's GetVertexBuffer example disposes this wrapper; never Destroy the asset.
-local function meshBufferState(name,mesh)
-    if not M.settings.render_comparison then return end
-    local buffer
-    local ok=pcall(function()
-        buffer=assert(mesh:GetVertexBuffer(0),"vertex buffer unavailable")
-        local count,stride=buffer.count,buffer.stride
-        assert(count>0 and stride>0,"empty GPU vertex buffer")
-        report("probe_"..name.."_gpu_count_"..count)
-        report("probe_"..name.."_gpu_stride_"..stride)
-    end)
-    if buffer then
-        local released=pcall(function() buffer:Dispose() end)
-        if not released then report("probe_"..name.."_gpu_wrapper_release_failed") end
-    end
-    if not ok then report("probe_"..name.."_gpu_unavailable") end
-end
 local function cloneVisual(template,name)
     local object=assert(U.Object.Instantiate(template),"native visual clone unavailable")
     M.objects=M.objects or {};M.objects[#M.objects+1]=object
@@ -187,7 +200,7 @@ local function cloneVisual(template,name)
 end
 local function buildModel(template,visual)
     local bytes=CS.System.Convert.FromBase64String(BIKE_MESH_BASE64)
-    -- XLua optimizes byte[] returns into a binary Lua string on this client.
+    -- XLua binary string return
     local byteLength=type(bytes)=="string" and #bytes or bytes.Length
     assert(byteLength and byteLength>12,"motorcycle bytes unavailable")
     local at=8
@@ -207,8 +220,7 @@ local function buildModel(template,visual)
             if exponent==0 then return sign*2^-126*(mantissa/8388608) end
             return sign*2^(exponent-127)*(1+mantissa/8388608)
         end
-        -- Decode directly: converting a 489KiB Lua byte string back to C# for
-        -- each BitConverter read would allocate/copy the entire buffer per vertex.
+        -- Decode binary payload directly in Lua
         return value
     end
     local function u32()return read("ToUInt32",4)end
@@ -238,9 +250,7 @@ local function buildModel(template,visual)
         local function tex(name,t) if mat:HasProperty(name) then mat:SetTexture(name,t) end end
         local function number(name,value) if mat:HasProperty(name) then mat:SetFloat(name,value) end end
         assert(mat:HasProperty("_BaseColorMap") and mat:HasProperty("_BaseColor"),"native shader contract changed")
-        -- Current native shader dump: HGRP/Lit has HGBuffer (GBuffer), NOT
-        -- ForwardOnly. Preserve native deferred/depth/stencil settings; guessing
-        -- an absent forward pass cannot make a runtime model draw.
+        -- Configure GBuffer deferred rendering parameters
         assert(mat:FindPass("HGBuffer")>=0,"native color pass unavailable")
         assert(mat:GetFloat("_UseDeferredRendering")==1,"native deferred contract changed")
         mat:SetShaderPassEnabled("HGBuffer",true)
@@ -254,27 +264,7 @@ local function buildModel(template,visual)
         if mat:HasProperty("_EmissiveColor") then mat:SetColor("_EmissiveColor",U.Color(0,0,0,1)) end
         materials[key]=mat;return mat
     end
-    M.parts={};M.renderers={};M.probeRoots={};M.probeRenderers={}
-    local borrowedMaterial=visual:GetComponent(typeof(U.MeshRenderer)).sharedMaterial
-    local function probe(name,offset)
-        local go=cloneVisual(visual,"ZML_Bike_Probe_"..name)
-        go.transform:SetParent(M.visual.transform,false);go.transform.localPosition=offset
-        go:SetActive(false)
-        M.probeRoots[#M.probeRoots+1]=go
-        return go,go:GetComponent(typeof(U.MeshRenderer))
-    end
-    -- 2x2 controlled comparison: same scene/layer/scale, no business/physics.
-    local native,nativeRenderer=probe("Native",V(-2.4,0,2.4))
-    M.probeRenderers.native={nativeRenderer}
-    meshBufferState("native",native:GetComponent(typeof(U.MeshFilter)).sharedMesh)
-    local nativeOwned,nativeOwnedRenderer=probe("NativeOwned",V(2.4,0,2.4))
-    M.probeRenderers.native_owned={nativeOwnedRenderer}
-    local customNative=newObject("ZML_Bike_Probe_CustomNative")
-    customNative.layer=M.vehicle.layer
-    customNative.transform:SetParent(M.visual.transform,false)
-    customNative.transform.localPosition=V(-2.4,0,-2.4)
-    customNative:SetActive(false);M.probeRoots[#M.probeRoots+1]=customNative
-    M.probeRenderers.custom_native={}
+    M.parts={};M.renderers={}
     local branches={}
     local count=u32();assert(count>0 and count<=32,"motorcycle part count")
     for part=1,count do
@@ -297,9 +287,7 @@ local function buildModel(template,visual)
             local position=V(center.x+extent.x*px/32767,center.y+extent.y*py/32767,center.z+extent.z*pz/32767)
             positions[i]=position
             if (role==1 or role==2) and textured==1 then
-                -- Exact low-poly tread, including width and rotating facets.
-                -- Deduplicate CPU vertices once; scalar support tests below avoid
-                -- thousands of Lua->C# TransformPoint calls on every frame.
+                -- Deduplicate CPU vertices for wheel ground contact tests
                 local key=px..":"..py..":"..pz
                 tire[key]={x=position.x,y=position.y,z=position.z}
             end
@@ -308,9 +296,7 @@ local function buildModel(template,visual)
             normals[i]=normal
             uvs[i]=U.Vector2(ux+uw*tu/65535,uy+uh*tv/65535)
             colors[i]=U.Color(1,1,1,1)
-            -- Palette UVs often have zero triangle area: UV-derived tangents can
-            -- degenerate. A finite normal-orthogonal tangent is sufficient for
-            -- our flat normal map and is deterministic for every vertex.
+            -- Generate orthogonal tangents for flat normal mapping
             local reference=math.abs(normal.y)<.9 and V(0,1,0) or V(1,0,0)
             local tangent=V.Cross(reference,normal).normalized
             tangents[i]=U.Vector4(tangent.x,tangent.y,tangent.z,1)
@@ -326,11 +312,8 @@ local function buildModel(template,visual)
         assert(vertices.Length==nv and distance(vertices[0],firstPosition)<.0001 and
             distance(vertices[nv-1],lastPosition)<.0001,"native vertex array write/read mismatch")
         assert(mesh.triangles.Length==ni,"native triangle upload mismatch")
-        -- CPU setter/readback is not proof of a GPU allocation in this custom SRP.
-        -- Explicitly submit once, after all attributes/indices/bounds are final.
-        -- false keeps our readable CPU copy; no borrowed Mesh is uploaded/modified.
+        -- Explicitly submit mesh data to GPU
         mesh:UploadMeshData(false)
-        if part==1 then meshBufferState("custom",mesh) end
         local parent=M.visual.transform
         local localPivot=pivot
         if role>0 then
@@ -354,63 +337,9 @@ local function buildModel(template,visual)
         renderer.sharedMaterial=material(textured,r,g,b,a)
         renderer.enabled=true
         M.renderers[#M.renderers+1]=renderer
-        if part==1 then nativeOwnedRenderer.sharedMaterial=renderer.sharedMaterial end
-        local comparison=cloneVisual(visual,"ZML_Bike_Probe_Custom_"..part)
-        comparison.transform:SetParent(customNative.transform,false)
-        comparison.transform.localPosition=pivot
-        -- Reuse the very same uploaded Mesh; no second decoder or geometry copy.
-        comparison:GetComponent(typeof(U.MeshFilter)).sharedMesh=mesh
-        local comparisonRenderer=comparison:GetComponent(typeof(U.MeshRenderer))
-        comparisonRenderer.sharedMaterial=borrowedMaterial
-        comparisonRenderer.enabled=true
-        M.probeRenderers.custom_native[#M.probeRenderers.custom_native+1]=comparisonRenderer
     end
     assert(at==byteLength,"motorcycle asset trailing bytes")
     report("bundled_model_ready")
-end
-
-local function probeState()
-    if not M.settings.render_comparison or not M.probeRenderers then return end
-    local groups={custom_owned=M.renderers,native=M.probeRenderers.native,
-        native_owned=M.probeRenderers.native_owned,custom_native=M.probeRenderers.custom_native}
-    for name,renderers in pairs(groups) do
-        local ok=pcall(function()
-            local r=renderers[1]
-            local mat=r.sharedMaterial
-            report("probe_"..name.."_force_off_"..(r.forceRenderingOff and "1" or "0"))
-            report("probe_"..name.."_shader_supported_"..(mat.shader.isSupported and "1" or "0"))
-            report("probe_"..name.."_hgbuffer_query_"..(mat:GetShaderPassEnabledAndExisted("HGBuffer") and "1" or "0"))
-        end)
-        if not ok then report("probe_"..name.."_state_unavailable") end
-    end
-end
-local function visibilityCheck()
-    if M.probeCheck and M.settings.render_comparison and M.phase=="parked" then
-        M.probeCheck=M.probeCheck+1
-        if M.probeCheck>=30 then
-            for name,renderers in pairs(M.probeRenderers or {}) do
-                local any=false
-                for _,renderer in ipairs(renderers) do if renderer.isVisible then any=true break end end
-                report("probe_"..name.."_camera_"..(any and "1" or "0"))
-            end
-            M.probeCheck=nil -- bounds diagnosis only, NOT color visibility acceptance
-        end
-    end
-    if not M.vehicle or not M.visibilityFrames then return end
-    local visible=0
-    for _,renderer in ipairs(M.renderers or {}) do
-        if live(renderer) and renderer.enabled and renderer.isVisible then visible=visible+1 end
-    end
-    if visible>0 then
-        report("model_camera_visible");M.visibilityFrames=nil
-    else
-        M.visibilityFrames=M.visibilityFrames+1
-        if M.visibilityFrames>=45 then
-            report("model_camera_not_visible")
-            pcall(function() logger.error("ZML Motorcycle diagnostic: no owned renderer marked visible; layer="..M.vehicle.layer) end)
-            M.visibilityFrames=nil -- bounded once per summon, not a per-frame log
-        end
-    end
 end
 
 local function removeSpeeds(lease)
@@ -424,13 +353,12 @@ local function removeSpeeds(lease)
 end
 local function optionalVector(value)
     if value==nil then return nil end
-    -- XLua may unbox Nullable<Vector3> directly, or expose the struct wrapper.
+    -- Nullable<Vector3> value unpack
     local ok,has=pcall(function()return value.HasValue end)
     if ok and has~=nil then return has and value.Value or nil end
     return value
 end
--- Explicit reflection flags avoid ambiguous/default lookup at the Lua bridge.
--- Cache metadata/direct method once per lease. Only these four MoveInput fields; no RVAs.
+-- Cache MoveInput reflection metadata
 local function drivePort(input)
     local t=assert(input:GetType(),"native drive type unavailable")
     assert(t.FullName=="Beyond.Gameplay.Core.MoveInput" and not t.IsValueType,"unexpected native movement input type")
@@ -466,16 +394,8 @@ local function drivePort(input)
     port.read=function(name) return optionalVector(fields[name]:GetValue(input)) end
     port.clear=function() fields.navMoveVector:SetValue(input,nil) end
     port.nav=function(direction)
-        -- Use the confirmed direct binding. Omit the OPTIONAL null clamp target:
-        -- no MethodInfo.Invoke/object[] (real XLua rejects that call signature).
+        -- Direct NavMove call
         nav(input,direction,false)
-    end
-    -- No vectors/keys/player values in diagnosis, only binding/empty-state flags.
-    report("drive_reflection_ready")
-    for _,name in ipairs({"navMoveVector","pendingNoManualMove","noManualMove"}) do
-        local ok,direct=pcall(function()return optionalVector(input[name])end)
-        report("drive_"..name:lower().."_direct_"..(not ok and "unavailable" or direct~=nil and "set" or "empty")..
-            "_boxed_"..(port.read(name)~=nil and "set" or "empty"))
     end
     report("drive_direct_nav_ready")
     return port
@@ -489,7 +409,7 @@ local function releaseDrive(lease)
     if not lease.char:IsValid() then lease.driveOwned=false return end
     local ok=pcall(function()
         local port=lease.drivePort
-        -- A foreign navigation/scripted move wins; never clear its command.
+        -- Skip when foreign navigation is active
         if (sameVector(port.read("navMoveVector"),lease.lastCommand) or sameVector(port.read("navMoveVector"),lease.previousCommand)) and
             port.read("navMoveClampTarget")==nil then
             port.clear()
@@ -512,7 +432,7 @@ local function queueDrive(lease,direction)
         assert(port.read("navMoveVector")==nil and port.read("navMoveClampTarget")==nil,
             "navigation input already in use")
     end
-    -- Track BEFORE calling: a binding throwing after a partial write must roll back.
+    -- Track lease before invocation
     lease.previousCommand=lease.lastCommand
     lease.driveOwned=true;lease.lastCommand=copy(direction)
     port.nav(direction)
@@ -520,24 +440,152 @@ local function queueDrive(lease,direction)
         "native drive write/read mismatch")
     lease.previousCommand=nil
 end
+-- ZML_VEHICLE_FLIGHT
+local function releaseCamera(l)
+    local cam=l.camera
+    if not cam then return end
+    local ok=pcall(function()
+        -- Restore camera FOV offset
+        if live(cam.node) and math.abs(cam.node.runtimeFOVOffset-cam.last)<.001 then
+            cam.node.runtimeFOVOffset=cam.original
+        end
+    end)
+    if ok then l.camera=nil end
+end
+local function clearSpeedFX(l)
+    for _,fx in ipairs(l.speedFX or {}) do
+        pcall(function() fx.ps:Stop(false,U.ParticleSystemStopBehavior.StopEmittingAndClear) end)
+        pcall(function() fx.go:SetActive(false) end)
+        pcall(function() fx.go.transform:SetParent(nil,false) end)
+        pcall(U.Object.Destroy,fx.go)
+    end
+    l.speedFX=nil
+end
+local function ridingCamera(l,dt)
+    if M.settings.ride_fov==0 then releaseCamera(l);return end
+    if l.cameraBlocked then return end
+    local manager=assert(GameInstance.cameraManager,"camera manager unavailable")
+    local ctrl=manager:GetMainLevelCameraController()
+    if not ctrl or manager.curActiveController~=ctrl then
+        releaseCamera(l);return
+    end
+    local node=assert(ctrl.levelVirtualCamera,"level camera unavailable")
+    if l.camera and l.camera.node~=node then releaseCamera(l);if l.camera then return end end
+    if not l.camera then
+        local original=node.runtimeFOVOffset
+        assert(type(original)=="number","native FOV offset unavailable")
+        l.camera={node=node,original=original,last=original}
+    end
+    local cam=l.camera
+    if math.abs(node.runtimeFOVOffset-cam.last)>.001 then
+        l.camera=nil;l.cameraBlocked=true;report("camera_foreign_change_preserved");return
+    end
+    local nextValue=damp(cam.last,cam.original+M.settings.ride_fov,dt,3/M.settings.fov_blend)
+    -- Track lease state
+    cam.last=nextValue;node.runtimeFOVOffset=nextValue
+end
+local FX_ROOT="assets/beyond/"
+local FX_SOURCES={
+    {path=FX_ROOT.."dynamicassets/gameplay/effects/prefabs/p_fxmap_common_rollingdust_2101.prefab",name="Smoke_Tuci_01",dust=true,scale=.6},
+    {path=FX_ROOT.."arts/effects/map/prefab/decorate/common/p_fxmap_common_windline_01.prefab",name="feng1_di01",scale=.35}}
+local function speedFX(l,dt)
+    local c=M.settings
+    local amount=c.speed_fx and c.speed_fx_intensity*clamp((math.abs(l.velocity or 0)-c.speed_fx_threshold)/3,0,1) or 0
+    if amount>0 and not l.speedFX then
+        l.speedFX={}
+        for _,spec in ipairs(FX_SOURCES) do
+            local prefab=assert(M.loader:LoadGameObject(spec.path),"speed effect resource unavailable")
+            local all=prefab:GetComponentsInChildren(typeof(U.ParticleSystem),true)
+            local source
+            for i=0,all.Length-1 do if all[i].gameObject.name==spec.name then
+                assert(not source,"ambiguous speed effect branch");source=all[i].gameObject
+            end end
+            assert(source and source.transform.childCount==0 and source:GetComponents(typeof(U.Component)).Length==3 and
+                source:GetComponent(typeof(U.Transform)) and source:GetComponent(typeof(U.ParticleSystemRenderer)),"unsafe speed effect branch")
+            for _,point in ipairs({BIKE.rear,BIKE.front}) do
+                local go=U.Object.Instantiate(source)
+                local fx={go=go,role=point==BIKE.rear and 1 or 2,dust=spec.dust,rotation=source.transform.localRotation,credit=0}
+                l.speedFX[#l.speedFX+1]=fx -- Track active particle effect
+                go.name="ZML_Bike_SpeedFX";go.layer=M.visual.layer
+                go.transform:SetParent(M.visual.transform,false)
+                go.transform.localScale=V(spec.scale,spec.scale,spec.scale)
+                fx.ps=assert(go:GetComponent(typeof(U.ParticleSystem)),"cloned particles unavailable")
+                fx.ps:Stop(false,U.ParticleSystemStopBehavior.StopEmittingAndClear)
+                local main=fx.ps.main
+                main.playOnAwake=false;main.loop=true;main.maxParticles=64
+                main.simulationSpace=spec.dust and U.ParticleSystemSimulationSpace.World or U.ParticleSystemSimulationSpace.Local
+                main.scalingMode=U.ParticleSystemScalingMode.Local
+                main.startLifetimeMultiplier=spec.dust and .7 or .3
+                main.startSpeedMultiplier=spec.dust and .1 or 0
+                main.startSizeMultiplier=spec.dust and .9 or 1
+                local shape=fx.ps.shape;shape.enabled=false
+                -- Configure particle emitters
+                local renderer=go:GetComponent(typeof(U.ParticleSystemRenderer));renderer.pivot=V(0,0,0)
+                if not spec.dust then renderer.alignment=U.ParticleSystemRenderSpace.Local end
+                local emission=fx.ps.emission;emission.enabled=false
+                fx.ps:Play(false)
+            end
+        end
+        report("speed_effects_ready")
+    end
+    for _,fx in ipairs(l.speedFX or {}) do
+        local wheel
+        for _,part in ipairs(M.parts) do if part.role==fx.role then wheel=part end end
+        assert(wheel,"speed effect wheel unavailable")
+        local point=wheel.transform.position
+        if fx.dust then
+            local plane=l.contactPlanes and l.contactPlanes[fx.role]
+            local normal=Q.Inverse(wheel.transform.rotation)*(plane and plane.normal or V(0,1,0))
+            local support,best=math.huge
+            for _,sample in ipairs(wheel.tire) do
+                local height=sample.x*normal.x+sample.y*normal.y+sample.z*normal.z
+                if height<support then support=height;best=sample end
+            end
+            assert(best,"speed effect tread unavailable")
+            point=wheel.transform:TransformPoint(V(best.x,best.y,best.z))+(plane and plane.normal or V(0,1,0))*.04
+        end
+        fx.go.transform.position=point
+        local yaw=l.bikeYaw+(fx.role==2 and l.geometry.roadAngle or 0)+(l.velocity<0 and 180 or 0)
+        fx.go.transform.rotation=Q.Euler(0,yaw,0)*fx.rotation
+        local rate=amount*(fx.dust and not l.airborne and 24 or not fx.dust and 16 or 0)
+        fx.credit=rate>0 and math.min(4,fx.credit+rate*dt) or 0
+        local count=math.floor(fx.credit)
+        if count>0 then fx.ps:Emit(count);fx.credit=fx.credit-count end
+    end
+end
+local function ridingExtras(l,dt)
+    if l.cameraFailed then releaseCamera(l) end
+    if not l.cameraFailed then
+        local ok,err=pcall(ridingCamera,l,dt)
+        if not ok then l.cameraFailed=true;releaseCamera(l);warnEvent("riding_camera_unavailable",err) end
+    end
+    if not l.speedFXFailed then
+        local ok,err=pcall(speedFX,l,dt)
+        if not ok then clearSpeedFX(l);l.speedFXFailed=true;warnEvent("speed_effect_unavailable",err) end
+    end
+end
 local function restore(lease)
     if not lease then return end
-    -- Independently restore every captured field: one destroyed node must not skip the rest.
+    -- Restore captured bones
     for _,b in ipairs(lease.bones) do
         pcall(function()
             if live(b.node) then b.node.localPosition=b.position; b.node.localRotation=b.rotation end
         end)
     end
     pcall(function() if live(lease.grounder) then lease.grounder.enabled=lease.grounderEnabled end end)
+    pcall(Flight.release,lease)
     removeSpeeds(lease)
     releaseDrive(lease)
-    if #lease.handles>0 or lease.driveOwned then M.pending[#M.pending+1]=lease; warnEvent("cleanup_retry") end
+    releaseCamera(lease);clearSpeedFX(lease)
+    if #lease.handles>0 or lease.driveOwned or lease.camera or lease.flight then M.pending[#M.pending+1]=lease; warnEvent("cleanup_retry") end
 end
 local function retryCleanup()
     for i=#M.pending,1,-1 do
+        pcall(Flight.release,M.pending[i])
         removeSpeeds(M.pending[i])
         releaseDrive(M.pending[i])
-        if #M.pending[i].handles==0 and not M.pending[i].driveOwned then table.remove(M.pending,i) end
+        releaseCamera(M.pending[i])
+        if #M.pending[i].handles==0 and not M.pending[i].driveOwned and not M.pending[i].camera and not M.pending[i].flight then table.remove(M.pending,i) end
     end
 end
 local function wheelParts()
@@ -565,7 +613,7 @@ local function groundPlane(mover,pos,wheel,fallback)
         origin=V(origin.x,pos.y+.8,origin.z)
         local count=U.Physics.RaycastNonAlloc(origin,V(0,-1,0),M.groundHits,1.45,
             mover:GetFloorLayerMask().value,U.QueryTriggerInteraction.Ignore)
-        -- A saturated buffer has unspecified nearest hit; use the native floor.
+        -- Fallback to native floor when buffer is saturated
         if count>=8 then return nil end
         local best
         for i=0,count-1 do
@@ -599,12 +647,18 @@ local function seatVehicle(mover,pos,heading,bank,pitch,bob)
     M.visual.transform.localPosition=V(0,0,0)
     local frame=heading*Q.Euler(0,M.settings.model_yaw,0)
     local undo=Q.Euler(0,-M.settings.model_yaw,0)
+    if M.lease and M.lease.airborne then
+        -- Follow native jump/fall trajectory
+        M.vehicle.transform:SetPositionAndRotation(pos+V(0,M.lease.rideHeight or 0,0),frame*Q.Euler(pitch,0,bank)*undo)
+        return 0,{}
+    end
     M.vehicle.transform:SetPositionAndRotation(pos,frame*Q.Euler(0,0,bank)*undo)
     local fallback=floorPlane(mover,pos)
     local rp=groundPlane(mover,pos,rear,fallback)
     local fp=groundPlane(mover,pos,front,fallback)
+    if M.lease then M.lease.contactPlanes={rp,fp} end
     local terrainPitch=0
-    -- Fit BOTH tyres, including tread width, not max(0,-lowest rim bottom).
+    -- Calculate ground contact plane for both tyres
     for i=1,3 do
         local rg,fg=tireGap(rear,rp,M.settings.scale),tireGap(front,fp,M.settings.scale)
         local span=math.max(.5,(front.transform.position-rear.transform.position).magnitude)
@@ -614,13 +668,13 @@ local function seatVehicle(mover,pos,heading,bank,pitch,bob)
     M.vehicle.transform.rotation=frame*Q.Euler(terrainPitch+pitch,0,bank)*undo
     local rg,fg=tireGap(rear,rp,M.settings.scale),tireGap(front,fp,M.settings.scale)
     M.vehicle.transform.position=pos+V(0,-(rg+fg)*.5+(bob or 0),0)
-    -- Small owned visual suspension stroke keeps each tyre on its contact plane
-    -- while the chassis pitches/bobs. Native collision/root are untouched.
+    -- Suspension stroke adjustment
     for _,item in ipairs({{rear,rp},{front,fp}}) do
         local part,plane=item[1],item[2]
         local gap=tireGap(part,plane,M.settings.scale)
         part.transform.position=part.transform.position+V(0,clamp(-gap,-.16,.16),0)
     end
+    if M.lease then M.lease.rideHeight=M.vehicle.transform.position.y-pos.y end
     return terrainPitch,{rear=tireGap(rear,rp,M.settings.scale),front=tireGap(front,fp,M.settings.scale)}
 end
 local function settleParked()
@@ -630,12 +684,11 @@ local function settleParked()
         seatVehicle(mover,M.vehicle.transform.position,M.vehicle.transform.rotation,0,0,0)
     end
 end
-function M.unmount(quiet)
+function M.unmount()
     local lease=M.lease
     M.lease=nil
     if lease then M.collisionArmed=nil end
     if M.vehicle then M.phase="parked" else M.phase="absent" end
-    syncProbes()
     for _,part in ipairs(M.parts or {}) do
         pcall(function() if live(part.transform) then part.transform.localRotation=Q.identity end end)
     end
@@ -646,33 +699,31 @@ function M.unmount(quiet)
             seatVehicle(lease.mover,lease.root.transform.position,lease.root.transform.rotation,0,0,0)
         end)
     end
-    if lease then restore(lease); report("dismounted"); if not quiet then notice("已下车") end end
+    if lease then restore(lease); report("dismounted") end
 end
-function M.dismiss(quiet)
+function M.dismiss()
     M.unmount(true)
     destroyVehicle()
     report("dismissed")
-    if not quiet then notice("摩托车已收回") end
 end
 local function fail(event,err)
-    M.faulted=true -- A contract failure must not produce a toast/error every frame.
+    M.faulted=true -- Mark faulted state
     M.unmount(true)
     M.removeInteraction();M.finishPresentation();M.requestedToggle=nil
     warnEvent(event,err)
-    notice("摩托车操作失败，已恢复角色；请查看模组日志")
+    notice("摩托车操作异常，已恢复角色状态")
 end
 function M.summon()
-    if M.presentation then notice("请等待摩托车操作完成") return end
-    if M.phase=="mounted" then notice("请先下车") return end
+    if M.presentation then return end
+    if M.phase=="mounted" then return end
     local ch,pc,mover,root=character()
     if not ch or not gameAllowed(pc) or not groundAllowed(mover) or #M.pending>0 then
-        report("summon_blocked");notice("当前不能召唤：请在普通地面、非战斗且可操作时重试") return
+        report("summon_blocked") return
     end
-    -- Park at the player's current, known-walkable position. No teleport or business entity is spawned.
+    -- Spawn vehicle at player position
     if M.vehicle then
         M.vehicle.transform:SetPositionAndRotation(root.transform.position,root.transform.rotation)
-        M.visibilityFrames=0;M.probeCheck=0
-        setScale();seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0);probeState();M.beginPresentation(false);notice(M.settings.render_comparison and "渲染对照已重定位：先不要上车，请截图四个位置" or "摩托车已移到身边");return
+        setScale();seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0);M.beginPresentation(false);return
     end
     local ok,err=pcall(function()
         M.loader=require_ex("Common/Utils/LuaResourceLoader").LuaResourceLoader()
@@ -680,9 +731,7 @@ function M.summon()
         local material=assert(M.loader:LoadMaterial(MATERIAL),"native shader template unavailable")
         report("model_material_loaded")
         M.vehicle=newObject("ZML_Motorcycle")
-        -- The character control/collider root may be on a non-rendering layer.
-        -- Use the client's public default world layer for an ordinary scene mesh,
-        -- not a copied logic/HIDE/UI/physics layer, and the actual gameplay scene.
+        -- Place visual mesh on default world layer
         local layer=CS.Beyond.Gameplay.LayerDef.DEFAULT_LAYER
         assert(type(layer)=="number" and layer>=0 and layer<32,"native world layer unavailable")
         M.vehicle.layer=layer
@@ -696,15 +745,12 @@ function M.summon()
         setScale()
         M.vehicle.transform:SetPositionAndRotation(root.transform.position,root.transform.rotation)
         seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0)
-        M.visibilityFrames=0
         report("model_world_layer_"..layer)
         M.phase="parked"
-        syncProbes();M.probeCheck=0;probeState()
-        if M.settings.render_comparison then report("render_comparison_ready") end
     end)
-    if not ok then destroyVehicle();warnEvent("model_load_failed",err);notice("自带摩托车模型加载失败，未修改角色") return end
+    if not ok then destroyVehicle();warnEvent("model_load_failed",err);notice("摩托车模型加载失败") return end
     M.beginPresentation(false)
-    report("summoned");notice(M.settings.render_comparison and "渲染对照：前左原生/原材质，前右原生/自材质，后左自带/原材质，脚边自带/自材质；请先截图" or "摩托车已召唤；靠近后使用原生交互骑乘")
+    report("summoned")
 end
 local boneNames={"pelvis","leftThigh","leftCalf","leftFoot","rightThigh","rightCalf","rightFoot",
     "leftUpperArm","leftForearm","leftHand","rightUpperArm","rightForearm","rightHand","head"}
@@ -747,8 +793,7 @@ local function captureRig(ch,mover,root)
     end
     assert(#lease.spines>0,"rider spine unavailable")
     lease.rig.spine=lease.spines[1]
-    -- Capture optional intervening nodes too: don't mix animated clavicles/neck
-    -- from one frame with the frozen rest of the adapted skeleton.
+    -- Capture clavicle and neck transforms
     for _,side in ipairs({"left","right"}) do
         local node=lease.rig[side.."UpperArm"].parent
         if live(node) and not seen[node] then snapshot(side.."Clavicle",node) end
@@ -814,10 +859,7 @@ local function captureRig(ch,mover,root)
     lease.previousPosition=copy(root.transform.position)
     return lease
 end
--- Scalar planner shared verbatim with the extracted-Avatar offline harness.
--- A seat surface is NOT the pelvis bone: allow a proportionate tissue clearance.
--- No per-character names/presets or bone length changes; the actual torso
--- segments/shoulder span determine fore-aft placement and forward flexion.
+-- Calculate rider seat offset based on torso and shoulder dimensions
 local function rotateOffset(v,angle,yaw,roll)
     local a,y=math.rad(angle),math.rad(yaw)
     local r=math.rad(roll or 0)
@@ -834,13 +876,11 @@ local function contactPoints(l,c,steer)
     for _,side in ipairs({"left","right"}) do
         local sign=side=="left" and -1 or 1
         local arm=l[side.."Arm"];local leg=l[side.."Leg"]
-        -- Short riders use the inner end of the existing rubber grips, never
-        -- an imaginary narrower handlebar. Wrist targets sit above the surface.
+        -- Align wrist target with handlebar grip
         local width=.32+.055*clamp((arm.l1+arm.l2-.37)/.19,0,1)
         local point=pivot+rotation*(V(sign*width,1.065,.34)-pivot)
         points[side.."Arm"]={point.x*c.scale,point.y*c.scale,point.z*c.scale}
-        -- Ankle is above the sole, not on the peg. Actual model pegs sit near
-        -- (+/-.25,.32,-.175); neutral standing foot clearance preserves heels.
+        -- Foot placement relative to footpeg coordinates
         points[side.."Leg"]={sign*.28*c.scale,.32*c.scale+l.footPads[side],-.245*c.scale}
     end
     return points
@@ -855,7 +895,7 @@ local function planPose(l,c,steer,drive,neutral,corner)
     -- forward-bent torso with the fork pulls short arms away from that grip.
     local yaw=-steer*.8
     -- Move the hips INSIDE the corner and lean the upper body independently.
-    -- Short arms get less hang-off, never imaginary grip targets or stretched bones.
+    -- Scale hang-off distance with arm length
     local roll=(corner or 0)*clamp((arms-.35)/.25,.2,1)
     local shift=-roll/5*.035
     local lowZ,highZ=neutral and math.max(-.27,preferZ-.10) or -.27,neutral and math.min(.04,preferZ+.14) or .04
@@ -885,7 +925,7 @@ local function planPose(l,c,steer,drive,neutral,corner)
         if not best or score<best.score then best={x=shift,roll=roll,z=z,angle=angle,height=height,yaw=yaw,score=score,error=error,points=points} end
     end
     for z=lowZ,highZ,.015 do for a=lowA,highA,3 do candidate(z,a) end end
-    -- Continuous local refinement avoids a visibly quantized body-size preset.
+    -- Refine seating posture
     for _,step in ipairs({.0075,.00375,.001875}) do
         local z,angle=best.z,best.angle
         for dz=-1,1 do for da=-1,1 do candidate(clamp(z+dz*step,lowZ,highZ),clamp(angle+da*step*160,lowA,highA)) end end
@@ -895,9 +935,7 @@ end
 local function fitConfiguration(l,c)
     local adjusted={}
     for key,value in pairs(c) do adjusted[key]=value end
-    -- Vehicle size is exactly the user's setting, parked AND mounted. Fit the
-    -- rider's seat position and forward lean, never shrink a normal motorcycle
-    -- into a toy or stretch character bones to obtain a contact-only metric.
+    -- Adapt rider seat position and torso lean angle to vehicle scale
     local plan=planPose(l,adjusted,0,0)
     assert(plan.error<.001,"configured bike outside rider reach; adjust model scale")
     local function steeringReach(angle)
@@ -911,8 +949,7 @@ local function fitConfiguration(l,c)
         end
         return reach<.001
     end
-    -- If a very short arm cannot follow full-lock steering, limit ONLY the fork
-    -- travel to its reachable range. Keep the chassis size and grip contact.
+    -- Clamp fork angle within reachable range for short arms
     local limit=c.max_steer
     if not steeringReach(limit) then
         local low,high=0,limit
@@ -937,7 +974,7 @@ local function speed(lease,braking)
     local desired=braking and 0 or (lease.throttle or 0)<0 and math.min(c.speed,3) or c.speed
     local accel=lease.collisionBlocked and 96 or braking and math.max(12,c.acceleration) or c.acceleration
     if lease.speed==desired and lease.speedAccel==accel then return end
-    -- Acquire before dropping the old handle; on exception all our handles are still tracked.
+    -- Update speed override handle
     local h=lease.mover:SetOverrideSpeed(desired,accel)
     lease.handles[#lease.handles+1]=h
     local old={}
@@ -949,78 +986,75 @@ local function speed(lease,braking)
     lease.speed,lease.speedAccel=desired,accel
 end
 local function control(lease,pc,dt)
+    if lease.flight then Flight.step(lease,dt);return end
+    if lease.airborne then queueDrive(lease,V(0,0,0));return end
     local c=lease.ridingConfig
     local raw=assert(pc.rawMoveAxis,"native raw move axis unavailable")
     local x,y=clamp(raw.x,-1,1),clamp(raw.y,-1,1)
+    if not (M.owner and M.owner.isControllerPanel) then
+        x=(keyActions.right.down() and 1 or 0)-(keyActions.left.down() and 1 or 0)
+        y=(keyActions.forward.down() and 1 or 0)-(keyActions.reverse.down() and 1 or 0)
+    end
     if math.abs(x)<.08 then x=0 end;if math.abs(y)<.08 then y=0 end
     lease.throttle=y
-    -- Configured full-lock fork travel also scales the high-speed steering
-    -- budget from the old 22-degree/3 m/s² baseline. Merely increasing the
-    -- stationary lock would leave the old huge moving turning radius intact.
-    -- This is a kinematic bicycle, not a full tyre/slip/dynamic balance simulator.
+    -- Scale high-speed steering budget based on fork travel
     local lateralBudget=3*lease.maxSteer/22
     local speedLimit=math.min(lease.maxSteer,math.deg(math.atan((BIKE.front.z-BIKE.rear.z)*c.scale*lateralBudget/
         math.max((lease.velocity or 0)^2,1))))
-    -- 0 keeps reachable full lock; 1 reproduces the previous speed limiter.
-    -- Read live settings: no costly pose refit or mount reset for this scalar.
+    -- Apply speed steer reduction
     local limit=lease.maxSteer+(speedLimit-lease.maxSteer)*M.settings.speed_steer_reduction
     lease.steer,lease.steerVelocity=spring(lease.steer or 0,lease.steerVelocity or 0,x*limit,dt,12)
     lease.steer=clamp(lease.steer,-lease.maxSteer,lease.maxSteer)
     lease.geometry=turnGeometry(c.scale,lease.steer)
-    -- Send a tangent for the rider/root reference point, including its offset
-    -- ahead of the rear axle. Native acceleration, ground checks and collision
-    -- resolve all movement; no Transform.position/teleport/delta injection.
+    -- Dispatch root motion tangent vector to native navigation
     local predictor=(lease.velocity or 0)*lease.geometry.curvature*dt*.5
     local yaw=lease.bikeYaw+math.deg(lease.geometry.beta+predictor)
     lease.motionDirection=Q.Euler(0,yaw,0)*V(0,0,1)
     y=M.collisionThrottle(lease,y,dt)
-    speed(lease,lease.collisionBlocked or U.Input.GetKey(U.KeyCode.LeftControl))
+    speed(lease,lease.collisionBlocked or keyActions.brake.down())
     queueDrive(lease,lease.motionDirection*(lease.braking and 0 or y))
 end
 function M.mount()
     if M.phase=="mounted" then M.unmount(false) return end
-    if not M.vehicle then notice("请先在 R 工具轮盘召唤摩托车") return end
-    if M.phase~="parked" or M.presentation then notice("请等待摩托车放置完成") return end
+    if not M.vehicle then return end
+    if M.phase~="parked" or M.presentation then return end
     local ch,pc,mover,root=character()
     if not ch or not gameAllowed(pc) or not groundAllowed(mover) or #M.pending>0 then
-        report("mount_blocked");notice("当前不能骑乘：请在普通地面、非战斗且可操作时重试") return
+        report("mount_blocked") return
     end
-    if distance(root.transform.position,M.vehicle.transform.position)>3.5 then notice("请靠近摩托车") return end
+    if distance(root.transform.position,M.vehicle.transform.position)>3.5 then return end
     local lease
     local ok,err=pcall(function()
-        lease=captureRig(ch,mover,root) -- All validation happens before any character mutation.
+        lease=captureRig(ch,mover,root) -- Capture character rig
         fitConfiguration(lease,M.settings)
         lease.input=assert(mover.input,"native movement input unavailable")
         lease.drivePort=drivePort(lease.input)
         assert(driveFree(lease.drivePort),"scripted movement input occupied")
         assert(lease.drivePort.read("navMoveVector")==nil and lease.drivePort.read("navMoveClampTarget")==nil,
             "navigation input already in use")
-        -- Verify the null setter on an ALREADY EMPTY field before acquiring a
-        -- persistent command. A broken cleanup binding must not freeze normal movement.
+        -- Verify navigation field cleanup binding
         lease.drivePort.clear()
         assert(lease.drivePort.read("navMoveVector")==nil,"native empty drive release rejected")
         report("drive_release_preflight_ready")
         lease.bikeYaw=root.transform.rotation.eulerAngles.y+M.settings.model_yaw
         lease.configModelYaw=M.settings.model_yaw
+        lease.groundY=root.transform.position.y;lease.airTime=0;lease.airborne=false
         lease.geometry=turnGeometry(lease.ridingConfig.scale,0)
         lease.motionDirection=Q.Euler(0,lease.bikeYaw,0)*V(0,0,1)
         M.lease=lease
         queueDrive(lease,V(0,0,0))
         M.vehicle.transform:SetPositionAndRotation(root.transform.position,root.transform.rotation)
-        -- Keep the native animator ticking: its root-motion/skill callbacks must remain normal.
-        -- Only the final rendered skeleton pose is adapted in TailTick.
+        -- Adapt final rendered skeleton pose in TailTick
         if live(lease.grounder) then lease.grounder.enabled=false end
         speed(lease,false)
         M.phase="mounted"
         M.removeInteraction();M.syncCollision()
         setScale()
-        syncProbes()
     end)
     if not ok then fail("mount_failed",err) return end
-    report("mounted");notice("已上车：W/S 前进/倒车，A/D 转动车把，左 Ctrl 刹车，"..M.settings.mount_key.." 下车")
+    report("mounted")
 end
--- Analytic two-bone IK: preserve skeleton lengths and derive rotation from the current bone axes.
--- No assumed character names, bind-axis angles, teleport, or real gameplay transforms.
+-- Analytic two-bone IK solver for limbs
 local function solve(chain,target,pole)
     local a,b,c=chain.a,chain.b,chain.c
     local delta=target-a.position
@@ -1043,7 +1077,7 @@ local function visual(dt)
     local l=M.lease
     if not l then return end
     local ch,pc,mover,root=character()
-    if ch~=l.char or not ch or not gameAllowed(pc) or not groundAllowed(mover) or not live(M.vehicle) then M.unmount(true) return end
+    if ch~=l.char or not ch or not gameAllowed(pc) or not rideTerrain(l,mover,0) or not live(M.vehicle) then M.unmount(true) return end
     dt=clamp(dt,0,.1)
     for _,b in ipairs(l.bones) do b.node.localPosition=b.position; b.node.localRotation=b.rotation end
     if l.configScale~=M.settings.scale or l.configSeat~=M.settings.seat_height or l.configSteer~=M.settings.max_steer then
@@ -1057,35 +1091,54 @@ local function visual(dt)
         l.configModelYaw=M.settings.model_yaw
     end
     local pos=root.transform.position
-    local delta=pos-(l.previousPosition or pos);delta=V(delta.x,0,delta.z)
+    local delta=pos-(l.previousPosition or pos)
+    local vertical=delta.y/math.max(dt,.008)
+    delta=V(delta.x,0,delta.z)
     l.previousPosition=copy(pos)
     local travel=delta.magnitude
-    -- Never spin or lurch across scene/root discontinuities, or from requested
-    -- speed while blocked by a wall. Use actual collision-resolved travel.
+    -- Compute travel distance from collision-resolved movement
     local discontinuity=travel>math.max(.5,c.speed*dt*3)
     if discontinuity then
         travel=0;delta=V(0,0,0)
         l.lean,l.leanVelocity,l.steer,l.steerVelocity=0,0,0,0
         l.velocity,l.accel,l.pitch,l.drive=0,0,0,0
+        vertical=0;l.jumpPitch,l.jumpPitchVelocity=0,0
+        l.groundSamples={};l.groundMomentum=V(0,0,0)
     end
-    -- Project collision-resolved travel onto the commanded longitudinal tangent.
-    -- Pushing into a wall/sideways depenetration cannot create phantom yaw/spin.
+    if not l.airborne and dt>.001 then
+        l.groundSamples=l.groundSamples or {}
+        local samples=l.groundSamples;samples[#samples+1]={delta=delta,dt=dt}
+        local total,elapsed=V(0,0,0),0
+        for _,sample in ipairs(samples) do total=total+sample.delta;elapsed=elapsed+sample.dt end
+        while #samples>1 and elapsed-samples[1].dt>=.1 do
+            total=total-samples[1].delta;elapsed=elapsed-samples[1].dt;table.remove(samples,1)
+        end
+        l.groundMomentum=total/math.max(elapsed,.001)
+    end
+    -- Project displacement onto motion tangent
     local signed=dot(delta,l.motionDirection)
     local g=l.geometry or turnGeometry(c.scale,l.steer or 0)
-    local yawStep=signed*g.curvature
+    -- Maintain momentum during vehicle flight
+    local yawStep=l.airborne and 0 or signed*g.curvature
     l.bikeYaw=U.Mathf.DeltaAngle(0,l.bikeYaw+math.deg(yawStep))
     l.yawRate=yawStep/math.max(dt,.008)
     local measured=signed/math.max(dt,.008)
     local oldVelocity=l.velocity or 0
     l.velocity=damp(oldVelocity,measured,dt,10)
     l.accel=damp(l.accel or 0,clamp((l.velocity-oldVelocity)/math.max(dt,.008),-16,16),dt,7)
-    -- Centripetal bank: slow turning does not lean like a fast corner.
+    -- Centripetal roll banking in turns
     local desired=-clamp(math.deg(math.atan(l.velocity*l.yawRate/9.81)),-20,20)
     l.lean,l.leanVelocity=spring(l.lean or 0,l.leanVelocity or 0,desired,dt,9)
     l.lean=clamp(l.lean,-20,20)
     l.pitch=damp(l.pitch or 0,clamp(-l.accel*.22,-2.5,2.5),dt,6)
+    local jumpTarget=l.airborne and -M.settings.jump_pitch*clamp(vertical/(l.jumpUp or 6),-1,1) or 0
+    l.jumpPitch,l.jumpPitchVelocity=spring(l.jumpPitch or 0,l.jumpPitchVelocity or 0,jumpTarget,dt,10)
+    if not l.airborne then
+        -- Smooth suspension landing recovery
+        l.jumpPitch=clamp(l.jumpPitch,-2,2)
+    end
     l.drive=damp(l.drive or 0,clamp(math.abs(l.velocity)/10*4+math.abs(l.accel)*.32,0,8),dt,5)
-    -- Body yaw comes ONLY from travel * curvature, never native actor facing.
+    -- Update body yaw from resolved displacement curvature
     local heading=Q.Euler(0,l.bikeYaw-M.settings.model_yaw,0)
     l.travel=(l.travel or 0)+travel
     l.rearAngle=((l.rearAngle or 0)+signed*g.rearFactor/(BIKE.rearRadius*c.scale)*180/math.pi)%360
@@ -1098,7 +1151,7 @@ local function visual(dt)
     end
     local t=M.visual.transform
     local bob=clamp(math.abs(l.velocity)/10,0,1)*.002*math.sin(l.travel*7)
-    l.terrainPitch,l.groundGaps=seatVehicle(mover,pos,heading,l.lean,l.pitch,bob)
+    l.terrainPitch,l.groundGaps=seatVehicle(mover,pos,heading,l.lean,l.pitch+l.jumpPitch,bob)
     local pose=planPose(l,c,l.steer or 0,l.drive,l.neutral,clamp(l.lean*.25,-5,5))
     assert(pose.error<.025,"dynamic rider reach unavailable")
     l.pose=pose
@@ -1119,51 +1172,54 @@ local function visual(dt)
         for _,kind in ipairs({"Leg","Arm"}) do
             local v=pose.points[side..kind];local point=target(v[1]/c.scale,v[2]/c.scale,v[3]/c.scale)
             l.targets[side..kind]=point
-            -- Bend knees mainly forward beside the tank, not sideways into a frog stance.
+            -- Align knee pole target forward along the tank
             local pole=kind=="Leg" and (t.forward+t.right*(sign*.12)) or (-t.forward*.45+t.right*(sign*.8)-t.up*.3)
             solve(l[side..kind],point,pole)
         end
         r[side.."Foot"].rotation=t.rotation*l.base[side.."Foot"]
-        -- Rotate the neutral hand longitudinal axis down around the bar rather
-        -- than letting forearm IK leave wrists in a standing T-pose orientation.
+        -- Rotate wrist rotation to align with handlebar grip
         local barRotation=t.rotation*forkRotation(l.steer or 0)
         r[side.."Hand"].rotation=Q.FromToRotation(barRotation*l.handAxes[side],barRotation*V(0,0,1))*barRotation*l.base[side.."Hand"]
         for _,chain in ipairs(l.fingers[side]) do for _,finger in ipairs(chain) do
             finger.node.localRotation=finger.rotation*Q.AngleAxis(finger.angle,finger.axis)
         end end
     end
+    ridingExtras(l,dt)
 end
 local function tick(dt)
     dt=clamp(dt or 1/60,0,.1)
     retryCleanup()
     if M.interactRemovalPending then M.removeInteraction() end
-    visibilityCheck()
     if M.faulted or not M.settings or not M.settings.enabled or #M.pending>0 then return end
     if not M.tickSeen then M.tickSeen=true;report("tick_active") end
     if not U.Application.isFocused or typing() then M.removeInteraction();M.unmount(true);M.finishPresentation();M.requestedToggle=nil;return end
-    local input=U.Input
+    local dismount=keyActions.dismount.pressed()
+    local jump=keyActions.jump.pressed()
     local action
-    -- Only dismount keeps a dedicated key. Summon/retract use the native wheel;
-    -- boarding uses InteractOption and its normal common_interact binding.
-    if M.phase=="mounted" and input.GetKeyDown(U.KeyCode[M.settings.mount_key]) then action="dismount" end
+    -- Keybind and interaction handling
+    if M.phase=="mounted" and dismount then action="dismount" end
     M.nativeUpdate(dt)
     local ch,pc,mover=character()
     if not ch or not gameAllowed(pc) then
         M.removeInteraction();M.unmount(true);M.finishPresentation()
         if action then
             report(ch and "hotkey_blocked_game" or "hotkey_blocked_character")
-            notice("当前不能操作摩托车：请返回普通探索界面并脱离战斗")
         end
         return
     end
-    if not M.driveProbed then
-        M.driveProbed=true
-        local ok,err=pcall(drivePort,mover.input) -- read-only, no NavMove/field write/speed change
-        if not ok then warnEvent("drive_probe_failed",err) end
-    end
-    if M.lease and (ch~=M.lease.char or not groundAllowed(mover)) then M.unmount(true) end
+    if M.lease and (ch~=M.lease.char or not rideTerrain(M.lease,mover,dt)) then M.unmount(true) end
     if action=="dismount" then M.unmount(false) end
-    if M.lease then control(M.lease,pc,dt) end
+    if M.lease then
+        local l=M.lease
+        local nativeJump=CS.Beyond.Gameplay.Core.MovementComponent.MoveMode.Jumping
+        if M.settings.jump_enabled and not l.flight and jump and
+            (groundAllowed(mover) or (mover.moveMode==nativeJump and l.airTime<.1)) and U.Time.unscaledTime>=(l.nextJump or 0) then
+            l.nextJump=U.Time.unscaledTime+M.settings.jump_cooldown
+            local ok,err=pcall(Flight.request,l)
+            if not ok then pcall(Flight.release,l);warnEvent("vehicle_jump_unavailable",err);notice("当前状态无法起跳") end
+        end
+        control(l,pc,dt)
+    end
 end
 local function guarded(fn,event,...)
     local ok,err=pcall(fn,...)
@@ -1184,13 +1240,14 @@ local function ensureCleanupUpdate()
     end)
 end
 function M.show(ctrl)
-    -- UICtrl distinguishes PC, controller and default prefabs. PC is not default.
+    -- Check panel prefab variant
     if not (ctrl.isPCPanel or ctrl.isControllerPanel or ctrl.isDefaultPanel) then return end
     if M.owner and M.owner~=ctrl then M.hide(M.owner) end
     M.owner=ctrl
     M.lastOwner=ctrl
     removeUpdates()
     local ok,err=pcall(function()
+        ensureKeys()
         M.settings=config()
         M.faulted=false
         M.tickSeen=false
@@ -1201,7 +1258,7 @@ function M.show(ctrl)
                     M.settings=config()
                     M.faulted=false
                     if not M.settings.enabled then M.dismiss(true) else setScale();settleParked() end
-                    if M.lease then speed(M.lease,M.lease.braking) end
+                    if M.lease and not M.lease.airborne then speed(M.lease,M.lease.braking) end
                 end,"config_failed")
             end)
         end
@@ -1211,7 +1268,7 @@ function M.show(ctrl)
     end)
     if not ok then
         M.hide(ctrl);warnEvent("initialization_failed",err)
-        notice("摩托车模组初始化失败，请查看模组日志")
+        notice("摩托车初始化失败")
     end
 end
 function M.hide(ctrl)
@@ -1220,17 +1277,16 @@ function M.hide(ctrl)
     if M.unsub then pcall(M.unsub);M.unsub=nil end
     M.owner=nil
     M.syncCollision()
-    syncProbes()
     ensureCleanupUpdate()
 end
 function M.close(ctrl)
-    -- A hidden/non-owner prefab must not destroy the active owner's vehicle.
+    -- Verify vehicle ownership before cleanup
     if M.owner~=ctrl and (M.owner~=nil or M.lastOwner~=ctrl) then return end
     M.hide(ctrl);M.dismiss(true);M.requestedToggle=nil
     M.lastOwner=nil
     ensureCleanupUpdate()
 end
--- Private module bridge for this Mod's two source transforms, not a loader hook.
+-- Module state bridge
 local bridgeName="ZML/Motorcycle"
 assert(not hg.loadedModules[bridgeName],"motorcycle namespace already occupied")
 hg.loadedModules[bridgeName]={name=bridgeName,env={Motorcycle=M}}

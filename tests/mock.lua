@@ -142,7 +142,7 @@ local function go(name)
                 assert(h.sampleMode and time>=0 and time<=2 and ending==false)
                 if not h.assets[name] then
                     -- Native SampleVFX silently loads the unmodified original on
-                    -- a dictionary miss. It is NOT sampling our owned controller.
+                    -- Handle dictionary miss
                     h.fallbackLoads=(h.fallbackLoads or 0)+1;return
                 end
                 if MOCK.failEffectSample then error('native VFX sample failure') end
@@ -199,6 +199,28 @@ local u={Vector3=vec,Quaternion=quat,HumanBodyBones=setmetatable({},{__index=fun
     Application={isFocused=true},Object={},Component='Component',MeshFilter='MeshFilter',MeshRenderer='MeshRenderer',
     UI={InputField='InputField'},EventSystems={EventSystem={current={}}},Input={},
     KeyCode=setmetatable({},{__index=function(_,k)return k end}),Mathf={}}
+u.Transform='Transform';u.ParticleSystem='ParticleSystem';u.ParticleSystemRenderer='ParticleSystemRenderer'
+u.ParticleSystemSimulationSpace={World='World',Local='Local'}
+u.ParticleSystemScalingMode={Local='Local'};u.ParticleSystemRenderSpace={Local='Local'}
+u.ParticleSystemStopBehavior={StopEmittingAndClear='Clear'}
+local function particleBranch(name,borrowed)
+    local g=go(name)
+    g.particleSource=borrowed;g.transform._childCount=0
+    if borrowed then table.remove(MOCK.objects) end
+    local ps={gameObject=g,main={},emission={},shape={enabled=true},emitted=0}
+    ps.Stop=function(_,children,behavior)assert(children==false and behavior=='Clear');ps.cleared=true;ps.playing=false end
+    ps.Play=function(_,children)assert(not children);ps.playing=true end
+    ps.Emit=function(_,count)
+        assert(not g.particleSource and ps.playing and (ps.main.simulationSpace=='World' or ps.main.simulationSpace=='Local') and ps.emission.enabled==false)
+        assert(ps.shape.enabled==false and ps.main.startSizeMultiplier>=.9 and ps.main.scalingMode=='Local')
+        assert(g.components.ParticleSystemRenderer.pivot.magnitude==0,'owned renderer pivot centered')
+        assert(count>0 and count<=4 and count%1==0 and ps.main.maxParticles==64)
+        ps.emitted=ps.emitted+count
+    end
+    g.components={Transform=g.transform,ParticleSystem=ps,ParticleSystemRenderer={alignment=g.name=='Smoke_Tuci_01' and 'View' or 'Local'}}
+    g.GetComponents=function(_,kind)assert(kind=='Component');return {Length=MOCK.unsafeSpeedFX and 4 or 3}end
+    return g
+end
 u.RaycastHit='RaycastHit'
 u.QueryTriggerInteraction={Ignore='Ignore'}
 u.BoxCollider='BoxCollider';u.Collider='Collider'
@@ -249,6 +271,11 @@ u.Object.Destroy=function(g)
     end
 end
 u.Object.Instantiate=function(template)
+    if template.particleSource then
+        MOCK.speedFXClones=(MOCK.speedFXClones or 0)+1
+        if MOCK.failSpeedFXClone or MOCK.failSpeedFXCloneAt==MOCK.speedFXClones then error('speed FX clone failure') end
+        return particleBranch(template.name,false)
+    end
     if M and M.presentation and template==MOCK.template then
         MOCK.shellCloneAttempts=(MOCK.shellCloneAttempts or 0)+1
         if MOCK.failGlowClone or MOCK.failGlowCloneAt==MOCK.shellCloneAttempts then error('factory shell clone failure') end
@@ -280,7 +307,8 @@ u.Input.GetKeyDown=function(key)
 end
 u.Input.GetKey=function(key) return MOCK.keysHeld[key] or false end
 u.Mathf.DeltaAngle=function(a,b) return (b-a+180)%360-180 end
-local mode={Grounded='Grounded',StepClimbing='StepClimbing',Pivot='Pivot',TurnStart='TurnStart',Jumping='Jumping',Falling='Falling'}
+local mode={Grounded='Grounded',StepClimbing='StepClimbing',Pivot='Pivot',TurnStart='TurnStart',Jumping='Jumping',AIJumping='AIJumping',Falling='Falling',Landing='Landing'}
+mode.External='External'
 CS={UnityEngine=u,TMPro={TMP_InputField='TMP_InputField'},Beyond={Gameplay={LayerDef={DEFAULT_LAYER=8,WALKABLE_LAYER=8,ALL_STATIC_SCENE_WITH_TERRAIN_LAYER_MASK=256},Core={MovementComponent={MoveMode=mode}}}}}
 u.Rendering={ShadowCastingMode={Off='Off'}}
 CS.Beyond.Gameplay.View={EntityRenderHelper='EntityRenderHelper'}
@@ -420,15 +448,18 @@ LuaUpdate.Add=function(self,name,fn)
 end
 LuaUpdate.Remove=function(self,key) MOCK.updates[key]=nil end
 function MOCK.run(name,dt)
+    local mover=GameInstance.playerController.mainCharacter.movementComponent
+    if mover.pendingExternalLeave then mover.pendingExternalLeave=nil;mover.moveMode='Grounded' end
     if name=='Tick' then u.Time.unscaledTime=u.Time.unscaledTime+(dt or 1/60) end
     local entries={};for key,entry in pairs(MOCK.updates)do if entry.name==name then entries[#entries+1]={key,entry.fn} end end
     for _,entry in ipairs(entries) do if MOCK.updates[entry[1]] and entry[2](dt or 1/60) then MOCK.updates[entry[1]]=nil end end
+    if name=='Tick' then MOCK.keysDown={} end -- Unity key-down lasts one frame even when not polled.
 end
 function MOCK.press(key) MOCK.keysDown[key]=true;MOCK.run('Tick') end
 function MOCK.countUpdates() local n=0;for _ in pairs(MOCK.updates) do n=n+1 end return n end
 function MOCK.newCharacter()
     local rootGo=go('ORIGINAL_CHARACTER')
-    rootGo.layer=31;rootGo.scene={handle=9} -- Logic/HIDE root is not a render-layer template.
+    -- Root layer template check
     local root={transform=rootGo.transform,gameObject=rootGo}
     local rig={pelvis=transform(root.transform,v(0,0.98,0))}
     rig.spine={[0]=transform(rig.pelvis,v(0,0.25,0)),Length=1}
@@ -453,6 +484,7 @@ function MOCK.newCharacter()
         if MOCK.failRemove and MOCK.failRemove>0 then MOCK.failRemove=MOCK.failRemove-1;error('simulated native remove failure') end
         self.handles[key]=nil
     end
+    mover.velocity=v()
     local fields={}
     local function nav(_,direction,clampToOne,...)
         assert(select("#",...)==0,"direct binding must omit optional Nullable target")
@@ -499,13 +531,23 @@ function MOCK.newCharacter()
     end
     inputType.GetMethod=function(_,name,flags)
         if not checkFlags(flags) then return nil end
+        if name=='ConsumeJump' then return {IsPublic=true,IsStatic=false,ReturnType={FullName='System.Void'},GetParameters=function()return {Length=0}end} end
+        if name=='AIJump' then
+            if MOCK.missingJumpMethod then return nil end
+            return {IsStatic=false,IsPublic=true,ReturnType={FullName='System.Void'},
+                GetParameters=function()return {Length=2,[0]={ParameterType=vectorType},
+                    [1]={ParameterType={IsGenericType=true,
+                        GetGenericTypeDefinition=function()return {FullName='System.Nullable`1'}end,
+                        GetGenericArguments=function()return {Length=1,[0]={FullName='System.Single'}}end},
+                        IsOptional=not MOCK.nonoptionalJump,HasDefaultValue=true}}end}
+        end
         assert(name=='NavMove');MOCK.methodResolves=(MOCK.methodResolves or 0)+1
         if MOCK.missingDriveMethod then return nil end
         return {IsStatic=false,IsPublic=true,ReturnType={FullName='System.Void'},
             GetParameters=function()return {Length=3,[0]={ParameterType=vectorType},
                 [1]={ParameterType={FullName='System.Boolean'},IsOptional=true,HasDefaultValue=true},[2]={ParameterType=nullableType,IsOptional=true,HasDefaultValue=true}}end,
             Invoke=function(_,obj,args)
-                error('invalid arguments to Invoke') -- exact real-client 0.4.2 failure, no pretend reflection success
+                error('invalid arguments to Invoke')
             end}
     end
     mover.input=setmetatable({}, {
@@ -513,6 +555,14 @@ function MOCK.newCharacter()
             if key=='GetType' then return function()return inputType end end
             if MOCK.throwDirectDrive and (key=='navMoveVector' or key=='navMoveClampTarget' or key=='noManualMove' or key=='pendingNoManualMove') then error('direct XLua getter unavailable') end
             if key=='NavMove' then return not MOCK.hideDirectNav and nav or nil end
+            if key=='ConsumeJump' then return function()MOCK.consumeJumpCalls=(MOCK.consumeJumpCalls or 0)+1;fields.jumpTrigger=false end end
+            if key=='AIJump' then return not MOCK.hideDirectJump and function(_,velocity,...)
+                assert(select('#',...)==0,'omit nullable up speed; do not pass guessed float')
+                if MOCK.failJump then error('native jump unavailable') end
+                mover.velocity=v(velocity.x,velocity.y,velocity.z)
+                MOCK.jumpCalls=(MOCK.jumpCalls or 0)+1;MOCK.jumpVelocity=velocity
+                mover.moveMode='AIJumping'
+            end or nil end
             if key=='MoveMotion' then return function(_,direction) fields.manualMoveVector=direction end end
             if key=='ResetView' then return function()
                 fields.noManualMove=fields.pendingNoManualMove;fields.pendingNoManualMove=nil
@@ -533,6 +583,42 @@ function MOCK.newCharacter()
             fields[key]=value
         end
     })
+    local movementType={FullName='Beyond.Gameplay.Core.MovementComponent'}
+    movementType.GetMethod=function(_,name,flags)
+        assert(checkFlags(flags))
+        if MOCK.missingFlightMethod==name then return nil end
+        local p={Length=0}
+        if name=='TryMoveCapsule' then
+            p={Length=7,[0]={ParameterType=vectorType},[1]={ParameterType={FullName='UnityEngine.Quaternion'}},
+                [2]={ParameterType={FullName='System.Boolean'}},[3]={IsOut=not MOCK.badFlightOut,ParameterType={IsByRef=true,
+                    GetElementType=function()return {FullName='UnityEngine.RaycastHit'}end}}}
+            for i=4,6 do p[i]={IsOptional=not MOCK.badFlightOptional,HasDefaultValue=true} end
+        else assert(name=='EnterExternal' or name=='LeaveExternal') end
+        return {IsPublic=true,IsStatic=false,ReturnType={FullName=name=='TryMoveCapsule' and 'System.Boolean' or 'System.Void'},GetParameters=function()return p end}
+    end
+    mover.GetType=function()return movementType end
+    mover.EnterExternal=function()
+        mover.moveMode='External';MOCK.externalEnters=(MOCK.externalEnters or 0)+1
+        if MOCK.failFlightEnter then error('external enter partial failure') end
+    end
+    mover.LeaveExternal=function()
+        if MOCK.failFlightLeave then error('external leave retry required') end
+        if mover.moveMode=='External' then mover.pendingExternalLeave=true end
+    end
+    mover.TryMoveCapsule=function(_,delta,rotation,requireExit,...)
+        assert(select('#',...)==0 and requireExit==true,'out hit/default parameters omitted in direct capsule binding')
+        if MOCK.failFlightCapsule then error('native capsule binding unavailable') end
+        local from=root.transform.position;local after=from+delta;local normal=v();local hit=false
+        local ground=MOCK.groundY or 0
+        if after.y<ground then after=v(after.x,ground,after.z);normal=v(0,1,0);hit=true end
+        if MOCK.flightCeiling and after.y>MOCK.flightCeiling then after=v(after.x,MOCK.flightCeiling,after.z);normal=v(0,-1,0);hit=true end
+        if MOCK.flightWall and after.x>MOCK.flightWall then after=v(MOCK.flightWall,after.y,after.z);normal=v(-1,0,0);hit=true end
+        root.transform.position=after
+        MOCK.capsuleSteps=MOCK.capsuleSteps or {};MOCK.capsuleSteps[#MOCK.capsuleSteps+1]=delta
+        if MOCK.failFlightAfterMove then error('native capsule partial write') end
+        return hit,{normal=normal,distance=(after-from).magnitude}
+    end
+    setmetatable(mover,{__index=function(_,key)if key=='logicPos' then return root.transform.position end end})
     local animator={speed=0.7,isHuman=false,Equals=equals}
     local grounder={enabled=true,ik={references=rig},Equals=equals}
     local ch={alive=true,valid=true,inCinematic=false,rootCom=root,movementComponent=mover,
@@ -547,6 +633,23 @@ end
 MOCK.character=MOCK.newCharacter()
 local pc={mainCharacter=MOCK.character,blockPlayerInput=false,castingNormalAttack=false,rawMoveAxis=v()}
 GameInstance={playerController=pc,isInGameplay=true}
+pc.Jump=function()
+    error('character jump must not be used')
+    MOCK.jumpCalls=(MOCK.jumpCalls or 0)+1
+    pc.mainCharacter.movementComponent.moveMode='Jumping'
+end
+MOCK.cameraOffset=0
+MOCK.levelCamera={Equals=equals}
+setmetatable(MOCK.levelCamera,{
+    __index=function(_,key)if key=='runtimeFOVOffset' then return MOCK.cameraOffset end end,
+    __newindex=function(_,key,value)
+        assert(key=='runtimeFOVOffset')
+        if MOCK.failCameraSet then error('camera setter unavailable') end
+        MOCK.cameraOffset=value
+    end})
+MOCK.cameraController={levelVirtualCamera=MOCK.levelCamera}
+GameInstance.cameraManager={curActiveController=MOCK.cameraController,
+    GetMainLevelCameraController=function()return MOCK.cameraController end}
 Utils={isInFight=function()return MOCK.fight or false end,isInThrowMode=function()return false end,isInCustomAbility=function()return MOCK.skill or false end}
 Notify=function(_,text) MOCK.notices[#MOCK.notices+1]=text end
 MessageConst={SHOW_TOAST=1}
@@ -577,6 +680,7 @@ MOCK.errors={}
 -- Match native release API: no warning member; warn is disabled, error remains active.
 logger={warn=function(_) end,error=function(message) MOCK.errors[#MOCK.errors+1]=message end}
 require_ex=function(path)
+    if path=='Common/Utils/UIUtils' then return {} end
     assert(path=='Common/Utils/LuaResourceLoader')
     -- Native module has no `return Class`: require_ex returns its non-callable namespace.
     return {LuaResourceLoader=function()
@@ -600,6 +704,14 @@ require_ex=function(path)
             return a,4
         end
         loader.LoadGameObject=function(self,path)
+            if path:find('rollingdust_2101',1,true) or path:find('windline_01',1,true) then
+                if MOCK.failSpeedFXLoad then return nil end
+                local g=particleBranch(path:find('rollingdust',1,true) and 'Smoke_Tuci_01' or 'feng1_di01',true)
+                return {GetComponentsInChildren=function(_,kind,inactive)
+                    assert(kind=='ParticleSystem' and inactive==true)
+                    return {Length=1,[0]=g.components.ParticleSystem}
+                end}
+            end
             assert(path:find('motorcycle',1,true) and path:sub(-7)=='.prefab')
             MOCK.loads[#MOCK.loads+1]=path
             if MOCK.failPrefab then return nil end
@@ -627,15 +739,22 @@ require_ex=function(path)
     end}
 end
 
--- Test-only collision-resolved native step. Production never calls this or sets root position.
--- The fixture exposes input priority/persistence, not Unity physics acceptance.
+-- Simulated collision step for test
+-- Simulated physics environment.
 function MOCK.setAxes(x,y) pc.rawMoveAxis=v(x,y,0) end
 function MOCK.nativeStep(dt,signedSpeed)
     local ch=pc.mainCharacter;local input=ch.movementComponent.input
+    if ch.movementComponent.moveMode=='External' then return v() end
     local direction=input.moveVector
     if MOCK.nullableWrapped then direction=direction.Value or direction end
     local directionLength=direction.magnitude
     local magnitude=math.abs(signedSpeed or ch.movementComponent.speed or 0)
+    local mode=ch.movementComponent.moveMode
+    if mode=='AIJumping' or mode=='Falling' then
+        local velocity=ch.movementComponent.velocity
+        direction=v(velocity.x,0,velocity.z);directionLength=direction.magnitude;magnitude=directionLength
+    end
+    ch.movementComponent.velocity=directionLength>0 and not MOCK.wall and direction.normalized*magnitude or v()
     if directionLength>0 and not MOCK.wall then
         ch.rootCom.transform.position=ch.rootCom.transform.position+direction.normalized*(magnitude*dt)
     end

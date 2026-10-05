@@ -1,7 +1,7 @@
 local U=CS.UnityEngine
--- Lua assert(v,message) returns both values: do not forward it to a ctor.
+-- Handle assert return values
 local bad,ctorError=pcall(function() U.Material(assert({borrowedGlow=true},'glow missing')) end)
-assert(not bad and ctorError:find('invalid arguments to .ctor',1,true),'strict ctor reproduces 0.5.2 XLua error')
+assert(not bad and ctorError:find('invalid arguments to .ctor',1,true),'strict ctor rejects extra argument XLua error')
 local ctrl={isPCPanel=true}
 local ch=GameInstance.playerController.mainCharacter
 local position=ch.rootCom.transform.position
@@ -10,6 +10,7 @@ local function row() return MOCK.interact.m_optionInfoMap['zml.motorcycle.mount'
 local function empty() assert(not row() and MOCK.interact.m_optionInfoMap.foreign,'native foreign row preserved') end
 assert(hg.loadedModules['ZML/Motorcycle'].env.Motorcycle==M)
 assert(PUBLIC.get('motorcycle').summon_key==nil and PUBLIC.get('motorcycle').dismiss_key==nil,'old summon hotkeys absent from schema')
+local routineNotices=#MOCK.notices
 M.show(ctrl)
 MOCK.press('F6');MOCK.press('F8');MOCK.press('F7')
 assert(M.phase=='absent','removed hotkeys do not summon or board')
@@ -67,6 +68,7 @@ local recallSamples=#helper.samples
 M.requestToggle();MOCK.run('Tick');assert(M.phase=='retracting');empty()
 assert(M.vehicle==placed and #helper.samples>0,'retract stays visible during native animation')
 settle();assert(M.phase=='absent' and placed.destroyed);empty()
+assert(#MOCK.notices==routineNotices,'native wheel summon/recall, interaction mount, dismount and retract are silent')
 assert(#helper.samples>recallSamples and not helper.silentNoOps and helper.releases==1 and not helper.inited,
     'retract samples before final controller release')
 for _,a in ipairs(MOCK.borrowedEffects) do
@@ -84,7 +86,7 @@ MOCK.fight=false;MOCK.run('Tick');assert(row())
 MOCK.interact.m_optionInfoMap['zml.motorcycle.mount']=nil
 MOCK.run('Tick');assert(row())
 MOCK.interactClosed=true;MOCK.run('Tick');assert(row() and MOCK.interactAutoOpens,'lazy native panel opens immediately')
--- Expired or changed-character requests are cancelled, never surprise-recall.
+-- Cancel expired requests
 M.dismiss(true);M.requestToggle();U.Time.unscaledTime=U.Time.unscaledTime+4
 MOCK.run('Tick');assert(not M.vehicle and not M.requestedToggle)
 M.requestToggle();GameInstance.playerController.mainCharacter=MOCK.newCharacter()
@@ -96,7 +98,7 @@ M.hide(ctrl);assert(M.phase=='parked' and not M.presentation);empty()
 M.show(ctrl);MOCK.run('Tick');assert(row())
 assert(PUBLIC.set('motorcycle','enabled',false));assert(M.phase=='absent');empty()
 assert(PUBLIC.set('motorcycle','enabled',true))
--- A source may already have a cached assetName before Instantiate. Never guess
+-- Check cached asset name
 -- a key from the renamed Object.name or write the native private cache field.
 M.close(ctrl);MOCK.cachedEffectNames=true;M.show(ctrl);M.summon()
 assert(M.presentation and not M.renderHelper.fallbackLoads)

@@ -1,5 +1,6 @@
 #include "zml_plugin.h"
 #include "patch.hpp"
+#include "owned_lua.hpp"
 #include "model_asset.hpp"
 #include "asset_hashes.hpp"
 #include <filesystem>
@@ -13,7 +14,7 @@ int transformWheel(void*,const char* source,size_t size,ZmlSink sink,void* write
         if(!source || !sink || size>768*1024)return 0;
         std::string output;
         if(!motorcycle::patchWheel(std::string_view(source,size),wheel,output)) {
-            hostApi->log(hostApi->owner,"GeneralAbilityCtrl contract rejected/already modified; native source retained");return 0;
+            hostApi->log(hostApi->owner,"GeneralAbilityCtrl patch rejected");return 0;
         }
         sink(writer,output.data(),output.size());return 1;
     } catch(...) {return 0;}
@@ -23,7 +24,7 @@ int transform(void*,const char* source,size_t size,ZmlSink sink,void* writer) no
         if(!source || !sink || size>768*1024) return 0;
         std::string output;
         if(!motorcycle::patch(std::string_view(source,size),helper,output)) {
-            hostApi->log(hostApi->owner,"BattleActionCtrl contract rejected/already modified; native source retained");
+            hostApi->log(hostApi->owner,"BattleActionCtrl patch rejected");
             return 0;
         }
         sink(writer,output.data(),output.size());return 1;
@@ -39,6 +40,21 @@ int start(const ZmlHost* host) noexcept {
         std::ifstream stream(path,std::ios::binary);
         std::string bytes{std::istreambuf_iterator<char>(stream),{}};
         if(!stream || bytes.empty() || bytes.find('\0')!=bytes.npos) return 0;
+        const std::string keyLine="local LEGACY_DISMOUNT=\"F7\" -- ZML_KEYBIND_DEFAULT";
+        if(motorcycle::count(bytes,keyLine)!=1)return 0;
+        std::string legacy="F7";
+        if(host->state_directory) {
+            auto state=std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(host->state_directory)))/L"config.ini";
+            std::error_code ec;auto size=std::filesystem::file_size(state,ec);
+            if(!ec && size<=65536) {
+                std::ifstream f(state,std::ios::binary);std::string line;
+                while(std::getline(f,line)) {
+                    if(!line.empty() && line.back()=='\r')line.pop_back();
+                    if(line=="mount_key=F11")legacy="F11";
+                }
+            }
+        }
+        bytes.replace(bytes.find(keyLine),keyLine.size(),"local LEGACY_DISMOUNT=\""+legacy+"\"");
         auto mesh=motorcycle::readAsset(root/L"assets/sidra-bike.zmlmesh",512*1024);
         auto texture=motorcycle::readAsset(root/L"assets/Textures.png",64*1024);
         if(!motorcycle::validMesh(mesh)||motorcycle::sha256(mesh)!=motorcycle::meshHash||
@@ -58,6 +74,10 @@ int start(const ZmlHost* host) noexcept {
         constexpr std::string_view nativeToken="-- ZML_NATIVE_ACTIONS";
         if(motorcycle::count(bytes,nativeToken)!=1)return 0;
         bytes.replace(bytes.find(nativeToken),nativeToken.size(),actions);
+        constexpr std::string_view flightToken="-- ZML_VEHICLE_FLIGHT";
+        if(motorcycle::count(bytes,flightToken)!=1)return 0;
+        bytes.replace(bytes.find(flightToken),flightToken.size(),readLua(L"flight.lua"));
+        bytes=motorcycle::compactOwnedLua(bytes);
         wheel=readLua(L"wheel.lua");
         auto wheelIcon=motorcycle::readAsset(root/L"wheel-icon.png",16*1024);
         constexpr std::string_view wheelToken="-- ZML_WHEEL_ICON_DATA";

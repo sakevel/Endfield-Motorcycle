@@ -1,5 +1,6 @@
 #include "zml_plugin.h"
 #include "patch.hpp"
+#include "owned_lua.hpp"
 #include "model_asset.hpp"
 #include "asset_hashes.hpp"
 #include <Windows.h>
@@ -43,6 +44,9 @@ return BattleActionCtrl
 }
 int main(int argc,char** argv){
     try {
+        expect(motorcycle::compactOwnedLua("local x='--ok' --gone\nlocal y=[=[--preserve\n]=] --tail\n") ==
+            "local x='--ok'  \nlocal y=[=[--preserve\n]=]  \n", "compact preserves quoted/long strings and lines");
+        expect(motorcycle::compactOwnedLua("return 1--[=[hidden\ntext]=]+2") == "return 1 \n+2", "compact separates long comment tokens");
         expect(argc==2 || argc==4 || argc==6,"usage: ContractTests <DLL> [battle.lua battle-output.lua [ability.lua ability-output.lua]]");
         auto dll=std::filesystem::absolute(argv[1]);
         auto module=LoadLibraryW(dll.c_str());expect(module!=nullptr,"actual DLL load");
@@ -138,7 +142,7 @@ HL.Commit(GeneralAbilityCtrl)
             expect(!std::filesystem::exists(argv[5]),"exclusive wheel output");
             std::ofstream file(argv[5],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write wheel output");
         }
-        // The callback/host live for the process. Do not unload a registered plugin mid-test.
+        // Retain registered plugin for test lifetime
         std::cout<<"PASS: actual ABI1 DLL, lifecycle contract, atomic failure, lexical scope\n";
     } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

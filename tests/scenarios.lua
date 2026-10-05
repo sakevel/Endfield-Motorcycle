@@ -29,8 +29,8 @@ local ctrl={isPCPanel=true,isDefaultPanel=false,isControllerPanel=false}
 local ch=MOCK.character
 local original=state(ch)
 assert(PUBLIC.mod('motorcycle').config_menu=='standard' and not PUBLIC.mod('motorcycle').has_entry)
-assert(PUBLIC.get('motorcycle').render_comparison=='false','diagnostic default off after visibility acceptance')
-assert(PUBLIC.set('motorcycle','render_comparison',true),'exercise optional four-way probes explicitly')
+assert(PUBLIC.get('motorcycle').render_comparison==nil,'debug setting removed')
+assert(not PUBLIC.set('motorcycle','render_comparison',true),'old debug setting cannot be enabled')
 assert(PUBLIC.get('motorcycle').max_steer=='35','larger fork lock default')
 for _,value in ipairs({9,51,35.5,'invalid'}) do
     assert(not PUBLIC.set('motorcycle','max_steer',value),'steering schema rejects invalid values')
@@ -46,18 +46,20 @@ M.show(ctrl);assert(MOCK.countUpdates()==2 and M.phase=='absent')
 M.show(ctrl);assert(MOCK.countUpdates()==2,'idempotent show')
 local beforeNotice=#MOCK.notices
 GameInstance.playerController.blockPlayerInput=true;summon()
-assert(M.phase=='absent' and #MOCK.notices==beforeNotice+1,'blocked custom hotkey is diagnosed, no silent no-op')
+assert(M.phase=='absent' and #MOCK.notices==beforeNotice,'blocked operation is silent')
 GameInstance.playerController.blockPlayerInput=false
 ch.movementComponent.moveMode='Jumping';summon()
-assert(M.phase=='absent' and #MOCK.notices==beforeNotice+2,'ground gate diagnoses only an actual hotkey')
+assert(M.phase=='absent' and #MOCK.notices==beforeNotice,'ground gate is silent')
 ch.movementComponent.moveMode='Grounded'
 mount();assert(M.phase=='absent' and not M.lease)
 MOCK.failMaterial=true;summon();assert(M.phase=='absent' and M.loader==nil and M.vehicle==nil)
 assert(MOCK.errors[#MOCK.errors]:find('ZML Motorcycle: model_load_failed: ',1,true) and
     MOCK.errors[#MOCK.errors]:find('native shader template unavailable',1,true),'release logging retains own resource exception')
 assert(MOCK.disposals==1);MOCK.failMaterial=nil
+local routineNotices=#MOCK.notices
 summon();assert(M.phase=='parked' and M.vehicle and M.visual and M.loader)
-assert(#MOCK.loads==7 and MOCK.cloneCount==35 and #M.parts==4 and #M.owned==24,
+assert(#MOCK.notices==routineNotices,'summon has no popup')
+assert(#MOCK.loads==7 and MOCK.cloneCount==22 and #M.parts==4 and #M.owned==24,
     'own meshes/textures/materials plus two owned non-ECS glow materials')
 local palette=M.renderers[1].sharedMaterial.textures._BaseColorMap
 assert(palette.width==8 and palette.height==1 and palette.name=='ZML_Bike_EndfieldPalette')
@@ -65,28 +67,12 @@ assert(near(palette.pixels[4].r,1) and near(palette.pixels[4].g,239/255) and pal
     'exact Endfield yellow accent, no original red/green palette')
 local paint=M.renderers[2].sharedMaterial.colors._BaseColor
 assert(near(paint.r,247/255) and near(paint.g,247/255) and near(paint.b,242/255),'off-white body paint')
-assert(#M.probeRoots==3 and #M.probeRenderers.custom_native==11)
-assert(M.probeRenderers.native[1].gameObject.components.MeshFilter.sharedMesh.borrowedNative)
-assert(M.probeRenderers.native[1].sharedMaterial.borrowedNative,'native/native control unchanged')
-assert(M.probeRenderers.native_owned[1].gameObject.components.MeshFilter.sharedMesh.borrowedNative)
-assert(M.probeRenderers.native_owned[1].sharedMaterial==M.renderers[1].sharedMaterial,'native/owned reuses exact owned material')
-for i,r in ipairs(M.probeRenderers.custom_native) do
-    assert(r.sharedMaterial.borrowedNative)
-    assert(r.gameObject.components.MeshFilter.sharedMesh==M.renderers[i].gameObject.components.MeshFilter.sharedMesh,
-        'custom/native must reuse exactly the same uploaded Mesh, not another decoder')
-end
-for _,go in ipairs(M.probeRoots) do assert(go.activeSelf) end
-assert(PUBLIC.set('motorcycle','render_comparison',false))
-for _,go in ipairs(M.probeRoots) do assert(not go.activeSelf,'comparison hot disables only owned controls') end
-assert(M.phase=='parked' and M.vehicle)
-assert(PUBLIC.set('motorcycle','render_comparison',true))
-for _,go in ipairs(M.probeRoots) do assert(go.activeSelf) end
+assert(not M.probeRoots and not M.probeRenderers,'no diagnostic objects allocated')
 local meshes,triangles=0,0
 for _,r in ipairs(MOCK.resources) do if r.triangles and not r.destroyed then meshes=meshes+1;triangles=triangles+r.triangles.Length/3 end end
 assert(meshes==11 and triangles==23016,'full selected motorcycle decoded, not placeholder geometry')
 for _,r in ipairs(MOCK.resources) do if r.triangles and not r.destroyed then assert(r.uploaded) end end
-assert(#MOCK.buffers==2,'bounded first custom/native GPU descriptor queries only')
-for _,b in ipairs(MOCK.buffers) do assert(b.disposed,'GPU wrapper released immediately') end
+assert(#(MOCK.buffers or {})==0,'no diagnostic GPU wrappers queried')
 assert(M.visual.transform.localScale.x==1.15)
 assert(vecNear(M.vehicle.transform.position,ch.position))
 assert(not M.vehicle.components.Collider and not M.vehicle.components.Rigidbody)
@@ -99,11 +85,10 @@ for _,renderer in ipairs(M.renderers) do
     assert(renderer.gameObject.components.MeshFilter.sharedMesh.uv2~=nil,'native second UV attribute populated')
     assert(renderer.sharedMaterial.floats._RoughnessMax>renderer.sharedMaterial.floats._RoughnessMin)
 end
-MOCK.run('Tick');assert(M.visibilityFrames==nil,'visible camera check completed')
-assert(M.driveProbed and not MOCK.navCalls,'read-only startup probe must not invoke navigation')
+MOCK.run('Tick');assert(not MOCK.navCalls,'idle cannot invoke navigation')
 mount();assert(M.phase=='mounted' and M.lease and ch.animatorCom.animator.speed==0.7)
+assert(#MOCK.notices==routineNotices,'mount has no popup')
 local lease=M.lease
-for _,go in ipairs(M.probeRoots) do assert(not go.activeSelf,'probes hidden while mounted') end
 assert(lease.mover.handles[lease.handles[1]].speed==10)
 MOCK.run('TailTick')
 assert(near(M.visual.transform:InverseTransformPoint(ch.rig.pelvis.position).y,lease.pose.height/lease.ridingConfig.scale),'pelvis clearance follows the fitted seat surface')
@@ -128,17 +113,18 @@ assert(PUBLIC.set('motorcycle','scale',1.25))
 MOCK.run('TailTick');assert(M.visual.transform.localScale.x==lease.ridingConfig.scale and lease.ridingConfig.scale==1.25)
 assert(vecNear(ch.rig.pelvis.position,M.visual.transform:TransformPoint(CS.UnityEngine.Vector3(0,lease.pose.height/lease.ridingConfig.scale,lease.pose.z))))
 mount();assert(M.phase=='parked' and not M.lease);restored(ch,original)
--- No distant teleport to bike or player.
+assert(#MOCK.notices==routineNotices,'dismount has no popup')
+-- Check position proximity
 ch.rootCom.transform.position=CS.UnityEngine.Vector3(100,1,8);mount();assert(not M.lease)
-local playerPos=ch.position;summon();assert(vecNear(ch.position,playerPos));assert(vecNear(M.vehicle.transform.position,playerPos))
+local playerPos=ch.position;summon();assert(vecNear(ch.position,playerPos),'summon never moves actor');assert(vecNear(M.vehicle.transform.position,playerPos),table.concat(MOCK.errors,' | '))
 mount();assert(M.lease)
--- Death, battle, cutscene, jump and skill interruption all revert precisely.
-for _,test in ipairs({'fight','cutscene','jump','skill','death','blocked','unfocused'}) do
+-- Death, battle, cutscene, unsafe movement and skill interruption revert precisely.
+for _,test in ipairs({'fight','cutscene','unsafe_move','skill','death','blocked','unfocused'}) do
     if not M.lease then mount() end
     assert(M.lease)
     if test=='fight' then MOCK.fight=true
     elseif test=='cutscene' then ch.inCinematic=true
-    elseif test=='jump' then ch.movementComponent.moveMode='Jumping'
+    elseif test=='unsafe_move' then ch.movementComponent.moveMode='Plunge'
     elseif test=='skill' then MOCK.skill=true
     elseif test=='death' then ch.alive=false
     elseif test=='blocked' then GameInstance.playerController.blockPlayerInput=true
@@ -147,7 +133,7 @@ for _,test in ipairs({'fight','cutscene','jump','skill','death','blocked','unfoc
     MOCK.fight=false;ch.inCinematic=false;ch.movementComponent.moveMode='Grounded';MOCK.skill=false;ch.alive=true
     GameInstance.playerController.blockPlayerInput=false;CS.UnityEngine.Application.isFocused=true
 end
--- Switching to a different entity restores the former entity, never writes the new one.
+-- Restore state on entity switch
 mount();local other=MOCK.newCharacter();local otherOriginal=state(other)
 GameInstance.playerController.mainCharacter=other;MOCK.run('Tick');assert(not M.lease);restored(ch,original);restored(other,otherOriginal)
 GameInstance.playerController.mainCharacter=ch
@@ -157,7 +143,6 @@ CS.UnityEngine.EventSystems.EventSystem.current.currentSelectedGameObject=select
 MOCK.press('F8');assert(M.vehicle);MOCK.keysDown={}
 CS.UnityEngine.EventSystems.EventSystem.current.currentSelectedGameObject=nil
 M.hide(ctrl);assert(MOCK.countUpdates()==0 and M.phase=='parked');restored(ch,original)
-for _,go in ipairs(M.probeRoots) do assert(not go.activeSelf,'probes hidden with HUD') end
 -- Config modified from the menu while HUD is hidden is read again on show.
 assert(PUBLIC.set('motorcycle','enabled',false));M.show(ctrl);assert(M.phase=='absent' and not M.vehicle)
 assert(PUBLIC.set('motorcycle','enabled',true));summon();mount();assert(M.lease)
@@ -176,8 +161,8 @@ MOCK.failUpdate='TailTick';M.show(ctrl);assert(MOCK.countUpdates()==0 and M.unsu
 MOCK.failUpdate=nil;M.show(ctrl);summon();MOCK.failSpeed=true;mount()
 assert(not M.lease);restored(ch,original);MOCK.failSpeed=nil
 M.close(ctrl);assert(MOCK.countUpdates()==0 and M.unsub==nil and M.loader==nil)
--- Desktop and controller panels are not default panels; all native variants work.
--- Closing an unrelated prefab, even after the owner hides, cannot destroy its vehicle.
+-- Test panel type variants
+-- Verify vehicle persistence on unrelated close
 for _,variant in ipairs({
     {isPCPanel=true,isDefaultPanel=false,isControllerPanel=false},
     {isPCPanel=false,isDefaultPanel=false,isControllerPanel=true},
@@ -202,13 +187,6 @@ assert(vecNear(M.vehicle.transform.position,ch.rootCom.transform.position),'rend
 mount();assert(M.lease,'mount distance uses the same world frame')
 MOCK.run('TailTick');assert(vecNear(M.vehicle.transform.position,ch.rootCom.transform.position))
 M.close(desktop);ch.logicalOffset=nil;restored(ch,original)
--- Descriptor diagnostics must not prevent rendering, and must release even on read failure.
-for _,failure in ipairs({'failGpuQuery','failGpuRead'}) do
-    M.show(desktop);MOCK[failure]=true;summon()
-    assert(M.phase=='parked' and M.vehicle,'optional GPU diagnostics fail softly')
-    for _,b in ipairs(MOCK.buffers) do assert(b.disposed,'release wrapper even when descriptor throws') end
-    MOCK[failure]=nil;M.close(desktop)
-end
 -- Partial allocations must release every owned mesh/texture/material and native handle.
 for _,failure in ipairs({'failTexture','failMesh','failGpuUpload','emptyUpload','mismatchUpload','failPrefab','unsafePrefab','prefabChild','ambiguousPrefab','failClone','missingColorPass'}) do
     local beforeClones=MOCK.cloneCount or 0
@@ -288,7 +266,7 @@ end
 assert(forwardAngles[1]>forwardAngles[#forwardAngles]+10,'small bodies lean forward instead of using a toy-sized bike')
 GameInstance.playerController.mainCharacter=ch
 -- Unrealistically large configured bikes fail before any bone/speed mutation;
--- the chosen vehicle size is never silently reduced, and changing it recovers.
+-- Verify scale persistence
 M.show(desktop);summon();assert(PUBLIC.set('motorcycle','scale',2))
 mount();assert(not M.lease and M.faulted and M.visual.transform.localScale.x==2)
 restored(ch,original)
@@ -357,7 +335,7 @@ for _,hz in ipairs({30,120}) do
     for _=1,hz do MOCK.run('Tick',1/hz);MOCK.nativeStep(1/hz,-2);MOCK.run('TailTick',1/hz) end
     assert(U.Mathf.DeltaAngle(before,l.bikeYaw)<-5,'same steering reverses yaw when reversing')
     local beforeCommand=rider.movementComponent.input.navMoveVector
-    -- Native manual input changes and ResetView do not erase persistent NavMove.
+    -- Verify persistent NavMove across input changes
     for _=1,5 do
         rider.movementComponent.input:MoveMotion(U.Vector3(1,0,0))
         rider.movementComponent.input:ResetView()
@@ -443,7 +421,7 @@ do
     M.close(desktop);restored(rider,baseline)
 end
 
--- Speed reduction is a live scalar, not a cosmetic fork-only adjustment.
+-- Verify dynamic speed reduction scalar
 do
     local rider=MOCK.newCharacter();GameInstance.playerController.mainCharacter=rider
     local baseline=state(rider)
@@ -486,7 +464,7 @@ end
 GameInstance.playerController.mainCharacter=ch;MOCK.groundY=nil
 MOCK.nullableWrapped=true;M.show(desktop);summon();mount();assert(M.lease)
 MOCK.run('Tick');M.close(desktop);restored(ch,original);MOCK.nullableWrapped=nil
--- Replay the real 0.4.1 default-field-lookup failure before accepting the repair.
+-- Test default field lookup failure handling
 local ctor=MOCK.character.movementComponent.input:GetType()
 assert(ctor:GetField('navMoveVector')==nil,'actual default lookup miss captured')
 for _,flag in ipairs({'nonpublicDriveField','enumeratedFieldOnly'}) do
@@ -500,7 +478,7 @@ MOCK.readonlyDriveField=nil;M.close(desktop);restored(ch,original)
 MOCK.hideDirectNav=true;M.show(desktop);summon();mount()
 assert(not M.lease and M.faulted,'unavailable direct method rejects safely')
 MOCK.hideDirectNav=nil;M.close(desktop);restored(ch,original)
--- Exact old Invoke failure is present in the fixture; production must never use it.
+-- Verify Invoke failure handling
 local flags=CS.System.Enum.Parse(typeof(CS.System.Reflection.BindingFlags),'Instance, Public, NonPublic')
 local invoke=ctor:GetMethod('NavMove',flags)
 local ok,err=pcall(function()invoke:Invoke(ch.movementComponent.input,CS.System.Array.CreateInstance(typeof(CS.System.Object),3))end)

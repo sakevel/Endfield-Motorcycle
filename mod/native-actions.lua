@@ -4,8 +4,7 @@ local EFFECT_ROOT="assets/beyond/dynamicassets/gameplay/effects/vfx/"
 local EFFECT_NAMES={"P_factory_appear_cutoff","P_factory_appear_add",
     "P_factory_disappear_cutoff","P_factory_disappear_add"}
 local NEAR_DISTANCE=3.5
--- Conservative envelope from the licensed model: 0.83 x 1.286 x 2.2 metres.
--- Leave a tyre/step clearance at the bottom; native ground movement owns that.
+-- Model dimensions: 0.83 x 1.286 x 2.2 meters.
 local BODY_CENTER=V(.012,.74,0)
 local BODY_HALF=V(.44,.54,1.12)
 function M.createCollision()
@@ -29,8 +28,7 @@ function M.syncCollision()
     if not live(M.bodyCollider) then return end
     local _,_,_,root=character()
     local enable=M.owner~=nil and M.settings.enabled and M.phase=="parked" and not M.presentation
-    -- Summon/unmount currently parks at the native root. Do not depenetrate or
-    -- trap that player; enable the solid parked volume as soon as they step clear.
+    -- Enable solid collision box once player steps clear
     if root and not M.collisionArmed then
         local p=M.visual.transform:InverseTransformPoint(root.transform.position)-BODY_CENTER
         local pad=.4/M.settings.scale
@@ -50,6 +48,25 @@ local function collisionMask()
     assert(type(mask)=="number" and mask~=0,"static scene collision mask unavailable")
     return mask
 end
+-- Sweep vehicle box and capsule in flight
+function M.sweepFlight(lease,pos,delta)
+    local length=delta.magnitude
+    if length<.000001 then return delta end
+    local rotation=M.visual.transform.rotation
+    local center,half=volumeAt(lease,pos,rotation)
+    local direction=delta/length
+    local count=U.Physics.BoxCastNonAlloc(center,half,direction,M.collisionHits,rotation,
+        length+.02,collisionMask(),U.QueryTriggerInteraction.Ignore)
+    assert(count<16,"vehicle flight sweep saturated")
+    local reach,normal=length,nil
+    for i=0,count-1 do
+        local hit=M.collisionHits[i]
+        if foreignCollider(hit.collider,lease.root.transform) and dot(hit.normal,direction)<-.02 and hit.distance-.02<reach then
+            reach=math.max(0,hit.distance-.02);normal=hit.normal
+        end
+    end
+    return direction*reach,normal
+end
 function M.collisionThrottle(lease,throttle,dt)
     if throttle==0 then lease.collisionBlocked=false;return 0 end
     local sign=throttle<0 and -1 or 1
@@ -64,7 +81,7 @@ function M.collisionThrottle(lease,throttle,dt)
     local blocked=count>=16
     for i=0,(blocked and 0 or count)-1 do
         local h=M.collisionHits[i]
-        -- Allow retreat from a contact; exclude only our visual/character hierarchy.
+        -- Exclude self visual and character hierarchy from obstacle sweep
         if foreignCollider(h.collider,lease.root.transform) and dot(h.normal,direction)<-.02 then blocked=true end
     end
     if not blocked then
@@ -91,8 +108,7 @@ function M.wheelAvailable()
     return ok and c.enabled and not M.faulted
 end
 function M.requestToggle()
-    -- Native wheel recovers HUD asynchronously. Consume once after its owner is
-    -- shown again; never summon during clear-screen or bind another R action.
+    -- Deferred summon after wheel closes
     if M.wheelAvailable() then
         M.requestedToggle={character=GameInstance.playerController.mainCharacter,deadline=U.Time.unscaledTime+3}
         report("wheel_requested")
@@ -127,8 +143,7 @@ function M.syncInteraction()
     end
     if M.interactRemovalPending then return end
     if not interactionWanted() then return end
-    -- The native panel can be lazy-created by the first nearby game interaction.
-    -- Open through its normal manager, never force Show/clear another hide key.
+    -- Open interaction panel via UIManager
     if not open then ctrl=UIManager:AutoOpen(PanelId.InteractOption) end
     if not ctrl or ctrl.m_isClosed then return end
     local map=ctrl.m_optionInfoMap
@@ -139,8 +154,7 @@ function M.syncInteraction()
         end
     end
     if M.interactOwner==ctrl and exists then return end
-    -- Ordinary InteractOption row: native animation, common_interact keybind,
-    -- mouse button, controller hints, selection/scroll and identifier recycling.
+    -- Register InteractOption row
     ctrl:AddInteractOption({type=CS.Beyond.Gameplay.Core.InteractOptionType.Interactive,
         sourceId=OPTION_SOURCE,subIndex=0,text="骑乘摩托车",
         icon="btn_common_exchange_icon",sortId=0,action=function()
@@ -148,22 +162,20 @@ function M.syncInteraction()
             M.mount();M.syncInteraction()
         end})
     M.interactOwner=ctrl
-    -- Add only marks a dirty list. Flush through the real native refresh path
-    -- after wheel recovery; do not depend on leaving/re-entering a trigger.
+    -- Trigger native interact list update
     ctrl:_TryUpdateShowingList()
     ctrl:_UpdateBtnHint()
     report("interact_mount")
 end
 function M.stopEffects(release)
-    -- Disable/detach immediately: Destroy is deferred until end-of-frame, and
-    -- the helper can otherwise rediscover these temporary renderers on reinit.
+    -- Clean up temporary visual shell renderers
     for _,go in ipairs(M.glowObjects or {}) do
         pcall(function() go:SetActive(false);go.transform:SetParent(nil,false) end)
         pcall(U.Object.Destroy,go)
     end
     M.glowObjects=nil
     if M.renderHelper and live(M.renderHelper) then
-        -- ResetAll releases the native controllers; reserve it for destruction.
+        -- Full reset on destruction
         local ok,err=pcall(function()
             if release then M.renderHelper:ResetAll() else M.renderHelper:Reset() end
         end)
@@ -172,9 +184,7 @@ function M.stopEffects(release)
     M.presentation=nil
 end
 local function showFactoryShell()
-    -- Use the ACTUAL native controller instance material, not the asset's
-    -- unsampled template. Give it a primary draw on a separate owned renderer;
-    -- an appended pass on the Lit renderer is not proof of a visible shell.
+    -- Apply native controller material to visual shell
     M.glowObjects={}
     for i,source in ipairs(M.renderers) do
         local materials=source.sharedMaterials
@@ -214,21 +224,16 @@ local function effectHelper()
     for _,name in ipairs(EFFECT_NAMES) do
         local borrowed=assert(M.loader:LoadScriptableObject(EFFECT_ROOT..name:lower()..".asset"),"native factory VFX unavailable")
         local asset=own(U.Object.Instantiate(borrowed))
-        -- Instantiate appends (Clone); the native dictionary uses the cached
-        -- assetName getter, not our source path. Use the SAME key when sampling,
-        -- including a cache copied from an already-loaded source asset.
+        -- Register VFX timeline effects using cached asset name
         asset.name=name
         local key=asset.assetName
         assert(type(key)=="string" and #key>0 and not seen[key],"factory VFX key unavailable/duplicate")
         seen[key]=true;names[#names+1]=key
         assert(asset.data and not asset.useECSRenderer,"factory VFX contract changed")
-        -- The normal factory assets use a ten-metre absolute cutoff. Fit their
-        -- actual native scan/dissolve curves to this owned motorcycle's bounds.
+        -- Scale dissolve curves to vehicle bounds
         asset.data.useCutoffPosYAutoBounds=true
         if name:sub(-4)=="_add" then
-            -- Native factory material uses ECS UnityPerDraw cutoff parameters.
-            -- Our ordinary Renderer needs the non-ECS variant. Never edit the
-            -- shared game material or assign this clone back to a borrowed asset.
+            -- Configure non-ECS material parameters for MeshRenderer
             local source=assert(asset.data.material,"factory glow material unavailable")
             local mat=own(U.Material(source))
             mat.name="ZML_Bike_FactoryGlow"
@@ -266,7 +271,7 @@ function M.beginPresentation(removing)
     if not ok then
         M.stopEffects();warnEvent("factory_effect_failed",err)
         if removing then M.dismiss(true) else M.phase="parked" end
-        notice("工业构建光效未完成；摩托车操作已完成，请查看模组日志")
+        -- Effect skipped on failure
         return
     end
     report(removing and "retract_started" or "deploy_started")
@@ -299,7 +304,6 @@ function M.nativeUpdate(dt)
         elseif gameAllowed(pc) then
             M.requestedToggle=nil
             if M.presentation or #M.pending>0 or not groundAllowed(mover) then
-                notice("请等待摩托车操作完成，并返回普通地面")
             elseif M.isNear() then
                 M.unmount(true);M.beginPresentation(true)
             else

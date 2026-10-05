@@ -5,6 +5,7 @@
     "config.ini",
     "Motorcycle.dll",
     "motorcycle.lua",
+    "flight.lua",
     "assets/sidra-bike.zmlmesh",
     "assets/Textures.png",
     "THIRD_PARTY_NOTICES.md",
