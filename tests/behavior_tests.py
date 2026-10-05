@@ -1,7 +1,7 @@
 """Actual Lua + real public services, simulated Unity objects; NOT in-game acceptance."""
 from pathlib import Path
 import argparse,subprocess,sys,tempfile,base64,struct
-a=argparse.ArgumentParser();a.add_argument('--lupa-dir');a.add_argument('--services',required=True);a.add_argument('--patched');args=a.parse_args()
+a=argparse.ArgumentParser();a.add_argument('--lupa-dir');a.add_argument('--services',required=True);a.add_argument('--patched');a.add_argument('--wheel-patched');a.add_argument('--native-fixtures');a.add_argument('--native-only',action='store_true');args=a.parse_args()
 if args.lupa_dir:sys.path.insert(0,args.lupa_dir)
 from lupa.lua54 import LuaRuntime
 root=Path(__file__).resolve().parents[1]
@@ -33,13 +33,27 @@ try:
     helper=(root/'mod/motorcycle.lua').read_text(encoding='utf8')
     asset_data='local BIKE_MESH_BASE64="'+base64.b64encode((root/'mod/assets/sidra-bike.zmlmesh').read_bytes()).decode()+'"\nlocal BIKE_TEXTURE_BASE64="'+base64.b64encode((root/'mod/assets/Textures.png').read_bytes()).decode()+'"'
     helper=helper.replace('-- ZML_ASSET_DATA',asset_data)
+    helper=helper.replace('-- ZML_NATIVE_ACTIONS',(root/'mod/native-actions.lua').read_text(encoding='utf8'))
     lua.globals().M=lua.execute(helper)
-    lua.execute((root/'tests/scenarios.lua').read_text(encoding='utf8'))
+    if not args.native_only: lua.execute((root/'tests/scenarios.lua').read_text(encoding='utf8'))
+    wheel=(root/'mod/wheel.lua').read_text(encoding='utf8').replace('-- ZML_WHEEL_ICON_DATA','local WHEEL_ICON_BASE64="'+base64.b64encode((root/'mod/wheel-icon.png').read_bytes()).decode()+'"')
+    lua.globals().W=lua.execute(wheel)
+    lua.execute((root/'tests/native_scenarios.lua').read_text(encoding='utf8'))
+    lua.execute((root/'tests/collision_scenarios.lua').read_text(encoding='utf8'))
     if args.patched:
         source=Path(args.patched).read_text(encoding='utf8')
         assert lua.eval('function(s) local fn,err=load(s); assert(fn,err); return true end')(source)
         assert source.count('local ZMLMotorcycle')==1
         print('PASS: complete current-client transformed Lua syntax')
+    if args.wheel_patched:
+        source=Path(args.wheel_patched).read_text(encoding='utf8')
+        assert lua.eval('function(s) local fn,err=load(s); assert(fn,err); return true end')(source)
+        print('PASS: complete current-client transformed native wheel syntax')
+    if args.native_fixtures:
+        assert args.wheel_patched, '--native-fixtures requires the actual --wheel-patched output'
+        lua.globals().native_source=lambda name: (Path(args.native_fixtures)/name).read_text(encoding='utf8')
+        lua.globals().wheel_native_source=Path(args.wheel_patched).read_text(encoding='utf8')
+        lua.execute((root/'tests/current_native.lua').read_text(encoding='utf8'))
     print('PASS: motorcycle production Lua, real services, rig/state/rollback/input/resource mock scenarios')
 finally:
     server.stdin.close()

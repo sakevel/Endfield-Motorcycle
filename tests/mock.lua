@@ -61,6 +61,9 @@ tm.__index=function(a,k)
     if k=='localRotation' then return a._q end
     if k=='parent' then return a._parent end
     if k=='childCount' then return a._childCount or #a._children end
+    if k=='IsChildOf' then return function(self,parent)
+        while self do if self==parent then return true end;self=self.parent end;return false
+    end end
     if k=='GetChild' then return function(self,i) assert(i>=0 and i<#self._children);return self._children[i+1] end end
     if k=='position' then return a._parent and a._parent:TransformPoint(a._p) or a._p end
     if k=='rotation' then return a._parent and a._parent.rotation*a._q or a._q end
@@ -105,10 +108,67 @@ local function go(name)
     local g={name=name,layer=0,Equals=equals,components={},scene={handle=5},activeSelf=true}
     g.transform=transform();g.transform.gameObject=g
     g.AddComponent=function(self,kind)
-        assert(kind=='MeshFilter' or kind=='MeshRenderer','no gameplay scripts/physics added to original assets')
+        if kind=='BoxCollider' then
+            assert(self.name=='ZML_Bike_Collision','owned collider only')
+            if MOCK.failCollider then error('native collider unavailable') end
+            local c={gameObject=self,transform=self.transform,Equals=equals,enabled=true}
+            self.components[kind]=c;return c
+        end
+        if kind=='EntityRenderHelper' then
+            assert(self.name=='ZML_Bike_Model','native VFX only on owned visual root')
+            local h={Equals=equals,assets={},samples={},gameObject=self}
+            h.InitAll=function()
+                if MOCK.failEffectInit then error('native VFX init failure') end
+                h.renderers={}
+                local function collect(t)
+                    local r=t.gameObject and t.gameObject.components.MeshRenderer
+                    if r then h.renderers[#h.renderers+1]=r end
+                    for _,child in ipairs(t._children) do collect(child) end
+                end
+                collect(self.transform);h.inited=true
+            end
+            h.SetSampleMode=function(_,value) assert(value==true);h.sampleMode=true end
+            h.AddTimelineEffect=function(_,a)
+                if not h.inited then return end -- native released helper silently ignores this
+                assert(a.ownedResource and a.data.useCutoffPosYAutoBounds)
+                if a.name:sub(-4)=='_add' then
+                    assert(a.data.material.ownedResource and not a.data.material:IsKeywordEnabled('FACTORY_ECS_ON') and
+                        a.data.material:GetFloat('FACTORY_ECS')==0,'non-ECS glow material required')
+                end
+                h.assets[a.assetName]=a
+            end
+            h.SampleVFX=function(_,name,playing,time,ending)
+                if not h.inited then h.silentNoOps=(h.silentNoOps or 0)+1;return end
+                assert(h.sampleMode and time>=0 and time<=2 and ending==false)
+                if not h.assets[name] then
+                    -- Native SampleVFX silently loads the unmodified original on
+                    -- a dictionary miss. It is NOT sampling our owned controller.
+                    h.fallbackLoads=(h.fallbackLoads or 0)+1;return
+                end
+                if MOCK.failEffectSample then error('native VFX sample failure') end
+                h.samples[#h.samples+1]={name=name,time=time,playing=playing}
+                if name:sub(-4)=='_add' and not MOCK.missingNativeGlow then
+                    if not h.glow then
+                        h.glow={Equals=equals,shader={name='HGRP/Factory/UnlitFactoryBuildingGrowing'},floats={}}
+                        h.glow.GetFloat=function(_,key)assert(key=='_CutOffPosY');return h.glow.floats[key]end
+                        for _,r in ipairs(h.renderers) do r.sharedMaterials={Length=2,[0]=r.sharedMaterial,[1]=h.glow} end
+                    end
+                    h.glow.floats._CutOffPosY=MOCK.stalledNativeGlow and 0 or (name:find('disappear',1,true) and 1-time/2 or time/2)
+                end
+            end
+            h.Reset=function()
+                h.resets=(h.resets or 0)+1
+                for _,r in ipairs(h.renderers or {}) do r.sharedMaterials={Length=1,[0]=r.sharedMaterial} end
+                if h.glow then h.glow.destroyed=true;h.glow=nil end
+            end
+            h.ResetAll=function() h:Reset();h.releases=(h.releases or 0)+1;h.inited=false;h.sampleMode=false;h.assets={} end
+            self.components[kind]=h;return h
+        end
+        assert(kind=='MeshFilter' or kind=='MeshRenderer','only renderer/owned VFX allowed')
         local c={Equals=equals,gameObject=self,forceRenderingOff=false}
         if kind=='MeshRenderer' then
             setmetatable(c,{__index=function(_,key)
+                if key=='sharedMaterials' then return {Length=1,[0]=c.sharedMaterial} end
                 if key=='isVisible' then
                     local parent=self.transform
                     if self.activeSelf==false then return false end
@@ -141,6 +201,7 @@ local u={Vector3=vec,Quaternion=quat,HumanBodyBones=setmetatable({},{__index=fun
     KeyCode=setmetatable({},{__index=function(_,k)return k end}),Mathf={}}
 u.RaycastHit='RaycastHit'
 u.QueryTriggerInteraction={Ignore='Ignore'}
+u.BoxCollider='BoxCollider';u.Collider='Collider'
 u.Physics={RaycastNonAlloc=function(origin,direction,hits,maxDistance,mask,triggers)
     assert(direction.y==-1 and maxDistance==1.45 and mask==256 and triggers=='Ignore')
     if MOCK.failGroundQuery then error('simulated stripped physics binding') end
@@ -156,6 +217,26 @@ u.Physics={RaycastNonAlloc=function(origin,direction,hits,maxDistance,mask,trigg
     if MOCK.groundWall then hits[0].normal=v(1,0,0) end
     return 1
 end}
+u.Physics.BoxCastNonAlloc=function(center,half,direction,hits,rotation,reach,mask,triggers)
+    assert(half.z>half.x and half.y>0 and mask==256 and triggers=='Ignore' and reach>0)
+    if MOCK.failCollisionQuery then error('stripped box cast') end
+    MOCK.lastCast={center=center,half=half,direction=direction,reach=reach,rotation=rotation}
+    if MOCK.collisionSaturated then return 16 end
+    if MOCK.castOwn then
+        hits[0]={collider=M.bodyCollider,normal=-direction,point=center,distance=0};return 1
+    end
+    if MOCK.collisionWall then
+        hits[0]={collider={Equals=equals,transform=transform()},normal=MOCK.contactNormal or -direction,point=center,distance=.05}
+        return 1
+    end
+    return 0
+end
+u.Physics.OverlapBoxNonAlloc=function(center,half,colliders,rotation,mask,triggers)
+    assert(half.z>half.x and mask==256 and triggers=='Ignore')
+    MOCK.lastOverlap={center=center,rotation=rotation}
+    if MOCK.overlapWall then colliders[0]={Equals=equals,transform=transform()};return 1 end
+    return 0
+end
 u.GameObject=setmetatable({},{__call=function(_,name)return go(name)end})
 u.Object.Destroy=function(g)
     assert(g.name=='ZML_Motorcycle' or (g.name and g.name:find('ZML_Bike_',1,true)) or g.ownedResource,'never destroy original character/scene objects')
@@ -168,6 +249,21 @@ u.Object.Destroy=function(g)
     end
 end
 u.Object.Instantiate=function(template)
+    if M and M.presentation and template==MOCK.template then
+        MOCK.shellCloneAttempts=(MOCK.shellCloneAttempts or 0)+1
+        if MOCK.failGlowClone or MOCK.failGlowCloneAt==MOCK.shellCloneAttempts then error('factory shell clone failure') end
+    end
+    if template.borrowedEffect then
+        assert(template.useECSRenderer==false and template.data.useCutoffPosYAutoBounds==false)
+        local a={name=template.name..'(Clone)',_assetName=template._assetName,useECSRenderer=false,data={useCutoffPosYAutoBounds=false,material=template.data.material},ownedResource=true,Equals=equals}
+        setmetatable(a,{__index=function(self,key)
+            if key=='assetName' then
+                if not self._assetName then self._assetName=self.name end
+                return self._assetName
+            end
+        end})
+        MOCK.resources[#MOCK.resources+1]=a;return a
+    end
     assert(template==MOCK.template and template.transform.childCount==0 and
         template:GetComponents('Component').Length==3,'only audited pure LOD0 branch may be cloned')
     if MOCK.failClone then error('simulated native visual clone failure') end
@@ -185,7 +281,12 @@ end
 u.Input.GetKey=function(key) return MOCK.keysHeld[key] or false end
 u.Mathf.DeltaAngle=function(a,b) return (b-a+180)%360-180 end
 local mode={Grounded='Grounded',StepClimbing='StepClimbing',Pivot='Pivot',TurnStart='TurnStart',Jumping='Jumping',Falling='Falling'}
-CS={UnityEngine=u,TMPro={TMP_InputField='TMP_InputField'},Beyond={Gameplay={LayerDef={DEFAULT_LAYER=8},Core={MovementComponent={MoveMode=mode}}}}}
+CS={UnityEngine=u,TMPro={TMP_InputField='TMP_InputField'},Beyond={Gameplay={LayerDef={DEFAULT_LAYER=8,WALKABLE_LAYER=8,ALL_STATIC_SCENE_WITH_TERRAIN_LAYER_MASK=256},Core={MovementComponent={MoveMode=mode}}}}}
+u.Rendering={ShadowCastingMode={Off='Off'}}
+CS.Beyond.Gameplay.View={EntityRenderHelper='EntityRenderHelper'}
+CS.Beyond.Gameplay.Core.InteractOptionType={Interactive='Interactive'}
+u.Time={unscaledTime=0}
+hg={loadedModules={},loadedModuleNameList={}}
 u.SceneManagement={SceneManager={MoveGameObjectToScene=function(g,scene)
     assert(g.name=='ZML_Motorcycle' and g.transform.parent==nil and scene.handle==9)
     g.scene=scene
@@ -201,10 +302,12 @@ for _,method in ipairs({'ToInt16','ToUInt16','ToUInt32','ToSingle'}) do
     end
 end
 CS.System.Array.CreateInstance=function(kind,n)
-    assert(kind==vec or kind==u.Vector2 or kind==u.Vector4 or kind==u.Color or kind=='Int32' or kind=='RaycastHit' or kind=='Object')
+    assert(kind==vec or kind==u.Vector2 or kind==u.Vector4 or kind==u.Color or kind==u.Material or kind=='Int32' or kind=='RaycastHit' or kind=='Collider' or kind=='Object')
     return setmetatable({Length=n,kind=kind},{__newindex=function(self,i,value)
         assert(type(i)=='number' and i>=0 and i<n and i%1==0)
-        if kind=='Object' then -- public object[] accepts boxed values or nil
+        if kind=='Collider' then assert(value.transform and value.Equals)
+        elseif kind==u.Material then assert(value.shader,'material array takes actual controller material')
+        elseif kind=='Object' then -- public object[] accepts boxed values or nil
         elseif kind=='RaycastHit' then assert(value.point and value.normal)
         elseif kind=='Int32' then assert(type(value)=='number' and value%1==0)
         elseif kind==u.Color then assert(type(value)=='table' and value.r and value.g and value.b and value.a)
@@ -283,7 +386,18 @@ u.Mesh=function()
     r.RecalculateTangents=function()error('palette UV-derived tangent generation is intentionally forbidden')end
     return r
 end
-u.Material=function(template)
+u.Material=function(template,...)
+    assert(select('#',...)==0,'invalid arguments to .ctor: Material takes one source, not assert message')
+    if template.borrowedGlow then
+        if MOCK.failEffectMaterial then error('factory glow clone failure') end
+        local r=resource();r.floats={FACTORY_ECS=1};r.keywords={FACTORY_ECS_ON=true}
+        r.HasProperty=function(_,k)return k=='FACTORY_ECS' end
+        r.SetFloat=function(_,k,v)assert(k=='FACTORY_ECS');r.floats[k]=v end
+        r.GetFloat=function(_,k)return r.floats[k]end
+        r.DisableKeyword=function(_,k)assert(k=='FACTORY_ECS_ON');r.keywords[k]=nil end
+        r.IsKeywordEnabled=function(_,k)return r.keywords[k]==true end
+        return r
+    end
     assert(template.normalGameMaterial,'clone native template, never edit original')
     local r=resource();r.textures={};r.colors={};r.floats={_UseDeferredRendering=1};r.passes={HGBuffer=true,DepthOnly=false};r.shader={isSupported=true}
     r.HasProperty=function()return true end
@@ -306,6 +420,7 @@ LuaUpdate.Add=function(self,name,fn)
 end
 LuaUpdate.Remove=function(self,key) MOCK.updates[key]=nil end
 function MOCK.run(name,dt)
+    if name=='Tick' then u.Time.unscaledTime=u.Time.unscaledTime+(dt or 1/60) end
     local entries={};for key,entry in pairs(MOCK.updates)do if entry.name==name then entries[#entries+1]={key,entry.fn} end end
     for _,entry in ipairs(entries) do if MOCK.updates[entry[1]] and entry[2](dt or 1/60) then MOCK.updates[entry[1]]=nil end end
 end
@@ -435,6 +550,29 @@ GameInstance={playerController=pc,isInGameplay=true}
 Utils={isInFight=function()return MOCK.fight or false end,isInThrowMode=function()return false end,isInCustomAbility=function()return MOCK.skill or false end}
 Notify=function(_,text) MOCK.notices[#MOCK.notices+1]=text end
 MessageConst={SHOW_TOAST=1}
+PanelId={InteractOption=10}
+MOCK.interact={m_optionInfoMap={foreign={identifier={sourceId='native.foreign',subIndex=0}}}}
+MOCK.interact.AddInteractOption=function(self,data)
+    assert(data.type=='Interactive' and data.sourceId=='zml.motorcycle.mount' and data.subIndex==0)
+    self.m_optionInfoMap[data.sourceId]={identifier={sourceId=data.sourceId,subIndex=0},action=data.action,text=data.text}
+    self.m_needUpdateList=true
+end
+MOCK.interact._TryUpdateShowingList=function(self)
+    if self.m_needUpdateList then self.visibleOwn=self.m_optionInfoMap['zml.motorcycle.mount'];self.m_needUpdateList=false;return true end
+    return false
+end
+MOCK.interact._UpdateBtnHint=function(self) self.hintUpdated=true end
+MOCK.interact.RemoveInteractOption=function(self,data)
+    assert(data.type=='Interactive' and data.sourceId=='zml.motorcycle.mount' and data.subIndex==0)
+    if MOCK.failInteractionRemove then error('native removal unavailable') end
+    self.m_optionInfoMap[data.sourceId]=nil
+end
+UIManager={IsOpen=function(_,id)
+    assert(id==PanelId.InteractOption);return not MOCK.interactClosed,MOCK.interactClosed and nil or MOCK.interact
+end,AutoOpen=function(_,id)
+    assert(id==PanelId.InteractOption);MOCK.interactClosed=false;MOCK.interactAutoOpens=(MOCK.interactAutoOpens or 0)+1
+    return MOCK.interact
+end}
 MOCK.errors={}
 -- Match native release API: no warning member; warn is disabled, error remains active.
 logger={warn=function(_) end,error=function(message) MOCK.errors[#MOCK.errors+1]=message end}
@@ -450,6 +588,16 @@ require_ex=function(path)
             assert(path:find('motorcycle',1,true) and path:sub(-4)=='.mat');MOCK.loads[#MOCK.loads+1]=path
             if MOCK.failMaterial then return nil end
             return {normalGameMaterial=true},2
+        end
+        loader.LoadScriptableObject=function(self,path)
+            assert(path:find('/effects/vfx/p_factory_',1,true) and path:sub(-6)=='.asset')
+            MOCK.loads[#MOCK.loads+1]=path
+            if MOCK.failEffectAsset then return nil end
+            local name=path:match('/([^/]+)%.asset$'):gsub('^p_','P_')
+            local glow=name:sub(-4)=='_add' and {borrowedGlow=true,FACTORY_ECS=1,FACTORY_ECS_ON=true} or nil
+            local a={borrowedEffect=true,name=name,_assetName=MOCK.cachedEffectNames and ('cached_'..name) or nil,useECSRenderer=false,data={useCutoffPosYAutoBounds=false,material=glow}}
+            MOCK.borrowedEffects=MOCK.borrowedEffects or {};MOCK.borrowedEffects[#MOCK.borrowedEffects+1]=a
+            return a,4
         end
         loader.LoadGameObject=function(self,path)
             assert(path:find('motorcycle',1,true) and path:sub(-7)=='.prefab')

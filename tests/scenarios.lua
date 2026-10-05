@@ -1,3 +1,11 @@
+-- Legacy vehicle/rig regression scenarios invoke the public Mod state machine
+-- directly, not removed summon/boarding hotkeys. Native entry paths tested below.
+local function summon()
+    M.summon()
+    if M.presentation then M.finishPresentation() end
+    MOCK.run('Tick')
+end
+local function mount() M.mount() end
 local function near(a,b) return math.abs(a-b)<0.0001 end
 local function vecNear(a,b) return near(a.x,b.x) and near(a.y,b.y) and near(a.z,b.z) end
 local function quatNear(a,b) return near(a.x,b.x) and near(a.y,b.y) and near(a.z,b.z) and near(a.w,b.w) end
@@ -33,19 +41,20 @@ M.show({isDefaultPanel=false});assert(MOCK.countUpdates()==0)
 M.show(ctrl);assert(MOCK.countUpdates()==2 and M.phase=='absent')
 M.show(ctrl);assert(MOCK.countUpdates()==2,'idempotent show')
 local beforeNotice=#MOCK.notices
-GameInstance.playerController.blockPlayerInput=true;MOCK.press('F6')
+GameInstance.playerController.blockPlayerInput=true;summon()
 assert(M.phase=='absent' and #MOCK.notices==beforeNotice+1,'blocked custom hotkey is diagnosed, no silent no-op')
 GameInstance.playerController.blockPlayerInput=false
-ch.movementComponent.moveMode='Jumping';MOCK.press('F6')
+ch.movementComponent.moveMode='Jumping';summon()
 assert(M.phase=='absent' and #MOCK.notices==beforeNotice+2,'ground gate diagnoses only an actual hotkey')
 ch.movementComponent.moveMode='Grounded'
-MOCK.press('F7');assert(M.phase=='absent' and not M.lease)
-MOCK.failMaterial=true;MOCK.press('F6');assert(M.phase=='absent' and M.loader==nil and M.vehicle==nil)
+mount();assert(M.phase=='absent' and not M.lease)
+MOCK.failMaterial=true;summon();assert(M.phase=='absent' and M.loader==nil and M.vehicle==nil)
 assert(MOCK.errors[#MOCK.errors]:find('ZML Motorcycle: model_load_failed: ',1,true) and
     MOCK.errors[#MOCK.errors]:find('native shader template unavailable',1,true),'release logging retains own resource exception')
 assert(MOCK.disposals==1);MOCK.failMaterial=nil
-MOCK.press('F6');assert(M.phase=='parked' and M.vehicle and M.visual and M.loader)
-assert(#MOCK.loads==3 and MOCK.cloneCount==24 and #M.parts==4 and #M.owned==18,'own meshes/textures/materials replace the old game mesh')
+summon();assert(M.phase=='parked' and M.vehicle and M.visual and M.loader)
+assert(#MOCK.loads==7 and MOCK.cloneCount==35 and #M.parts==4 and #M.owned==24,
+    'own meshes/textures/materials plus two owned non-ECS glow materials')
 local palette=M.renderers[1].sharedMaterial.textures._BaseColorMap
 assert(palette.width==8 and palette.height==1 and palette.name=='ZML_Bike_EndfieldPalette')
 assert(near(palette.pixels[4].r,1) and near(palette.pixels[4].g,239/255) and palette.pixels[4].b==0,
@@ -88,7 +97,7 @@ for _,renderer in ipairs(M.renderers) do
 end
 MOCK.run('Tick');assert(M.visibilityFrames==nil,'visible camera check completed')
 assert(M.driveProbed and not MOCK.navCalls,'read-only startup probe must not invoke navigation')
-MOCK.press('F7');assert(M.phase=='mounted' and M.lease and ch.animatorCom.animator.speed==0.7)
+mount();assert(M.phase=='mounted' and M.lease and ch.animatorCom.animator.speed==0.7)
 local lease=M.lease
 for _,go in ipairs(M.probeRoots) do assert(not go.activeSelf,'probes hidden while mounted') end
 assert(lease.mover.handles[lease.handles[1]].speed==10)
@@ -114,14 +123,14 @@ MOCK.keysHeld.LeftControl=nil;MOCK.run('Tick');assert(M.lease.speed==12)
 assert(PUBLIC.set('motorcycle','scale',1.25))
 MOCK.run('TailTick');assert(M.visual.transform.localScale.x==lease.ridingConfig.scale and lease.ridingConfig.scale==1.25)
 assert(vecNear(ch.rig.pelvis.position,M.visual.transform:TransformPoint(CS.UnityEngine.Vector3(0,lease.pose.height/lease.ridingConfig.scale,lease.pose.z))))
-MOCK.press('F7');assert(M.phase=='parked' and not M.lease);restored(ch,original)
+mount();assert(M.phase=='parked' and not M.lease);restored(ch,original)
 -- No distant teleport to bike or player.
-ch.rootCom.transform.position=CS.UnityEngine.Vector3(100,1,8);MOCK.press('F7');assert(not M.lease)
-local playerPos=ch.position;MOCK.press('F6');assert(vecNear(ch.position,playerPos));assert(vecNear(M.vehicle.transform.position,playerPos))
-MOCK.press('F7');assert(M.lease)
+ch.rootCom.transform.position=CS.UnityEngine.Vector3(100,1,8);mount();assert(not M.lease)
+local playerPos=ch.position;summon();assert(vecNear(ch.position,playerPos));assert(vecNear(M.vehicle.transform.position,playerPos))
+mount();assert(M.lease)
 -- Death, battle, cutscene, jump and skill interruption all revert precisely.
 for _,test in ipairs({'fight','cutscene','jump','skill','death','blocked','unfocused'}) do
-    if not M.lease then MOCK.press('F7') end
+    if not M.lease then mount() end
     assert(M.lease)
     if test=='fight' then MOCK.fight=true
     elseif test=='cutscene' then ch.inCinematic=true
@@ -135,7 +144,7 @@ for _,test in ipairs({'fight','cutscene','jump','skill','death','blocked','unfoc
     GameInstance.playerController.blockPlayerInput=false;CS.UnityEngine.Application.isFocused=true
 end
 -- Switching to a different entity restores the former entity, never writes the new one.
-MOCK.press('F7');local other=MOCK.newCharacter();local otherOriginal=state(other)
+mount();local other=MOCK.newCharacter();local otherOriginal=state(other)
 GameInstance.playerController.mainCharacter=other;MOCK.run('Tick');assert(not M.lease);restored(ch,original);restored(other,otherOriginal)
 GameInstance.playerController.mainCharacter=ch
 -- Typing consumes no custom hotkey; no summon while game input is blocked or focus is lost.
@@ -147,20 +156,20 @@ M.hide(ctrl);assert(MOCK.countUpdates()==0 and M.phase=='parked');restored(ch,or
 for _,go in ipairs(M.probeRoots) do assert(not go.activeSelf,'probes hidden with HUD') end
 -- Config modified from the menu while HUD is hidden is read again on show.
 assert(PUBLIC.set('motorcycle','enabled',false));M.show(ctrl);assert(M.phase=='absent' and not M.vehicle)
-assert(PUBLIC.set('motorcycle','enabled',true));MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+assert(PUBLIC.set('motorcycle','enabled',true));summon();mount();assert(M.lease)
 assert(PUBLIC.set('motorcycle','enabled',false));assert(not M.lease and M.phase=='absent');restored(ch,original)
 assert(PUBLIC.set('motorcycle','enabled',true))
 -- Incomplete skeleton validation happens before mutation, and errors latch instead of spamming every tick.
-MOCK.press('F6');local saved=ch.rig.rightHand;ch.rig.rightHand=nil
-MOCK.press('F7');assert(not M.lease and M.faulted);restored(ch,{})
+summon();local saved=ch.rig.rightHand;ch.rig.rightHand=nil
+mount();assert(not M.lease and M.faulted);restored(ch,{})
 local messages=#MOCK.notices;for _=1,5 do MOCK.run('Tick') end;assert(#MOCK.notices==messages)
-ch.rig.rightHand=saved;M.show(ctrl);assert(not M.faulted);MOCK.press('F7');assert(M.lease)
+ch.rig.rightHand=saved;M.show(ctrl);assert(not M.faulted);mount();assert(M.lease)
 -- Track failed removals until retry succeeds, even if the panel closes.
 MOCK.failRemove=1;M.close(ctrl);assert(not M.lease and M.phase=='absent' and #M.pending==1)
 MOCK.run('Tick');assert(#M.pending==0 and MOCK.countUpdates()==0);restored(ch,original)
 -- Partial update registration and speed application fail closed and unsubscribe.
 MOCK.failUpdate='TailTick';M.show(ctrl);assert(MOCK.countUpdates()==0 and M.unsub==nil)
-MOCK.failUpdate=nil;M.show(ctrl);MOCK.press('F6');MOCK.failSpeed=true;MOCK.press('F7')
+MOCK.failUpdate=nil;M.show(ctrl);summon();MOCK.failSpeed=true;mount()
 assert(not M.lease);restored(ch,original);MOCK.failSpeed=nil
 M.close(ctrl);assert(MOCK.countUpdates()==0 and M.unsub==nil and M.loader==nil)
 -- Desktop and controller panels are not default panels; all native variants work.
@@ -171,27 +180,27 @@ for _,variant in ipairs({
     {isPCPanel=false,isDefaultPanel=true,isControllerPanel=false},
 }) do
     M.show(variant);assert(MOCK.countUpdates()==2,'non-default native HUD initializes')
-    MOCK.press('F6');assert(M.phase=='parked','native HUD hotkeys reach summon')
+    summon();assert(M.phase=='parked','HUD state machine reaches summon')
     M.close({isDefaultPanel=true});assert(M.vehicle and MOCK.countUpdates()==2)
     M.hide(variant);assert(MOCK.countUpdates()==0 and M.vehicle)
     M.close({isPCPanel=true});assert(M.vehicle,'unrelated hidden panel close ignored')
     M.close(variant);assert(M.phase=='absent' and not M.vehicle and not M.unsub)
 end
 local desktop={isPCPanel=true};local controller={isControllerPanel=true}
-M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+M.show(desktop);summon();mount();assert(M.lease)
 M.show(controller);assert(M.owner==controller and not M.lease and MOCK.countUpdates()==2)
 M.hide(desktop);M.close(desktop);assert(M.vehicle and MOCK.countUpdates()==2,'stale owner cannot remove live owner')
 M.close(controller);assert(not M.vehicle and MOCK.countUpdates()==0);restored(ch,original)
 -- Entity logical coordinates may not equal Unity's displayed world frame.
 ch.logicalOffset=CS.UnityEngine.Vector3(5000,0,2000)
-M.show(desktop);MOCK.press('F6')
+M.show(desktop);summon()
 assert(vecNear(M.vehicle.transform.position,ch.rootCom.transform.position),'render in Unity world, not logical map coordinates')
-MOCK.press('F7');assert(M.lease,'mount distance uses the same world frame')
+mount();assert(M.lease,'mount distance uses the same world frame')
 MOCK.run('TailTick');assert(vecNear(M.vehicle.transform.position,ch.rootCom.transform.position))
 M.close(desktop);ch.logicalOffset=nil;restored(ch,original)
 -- Descriptor diagnostics must not prevent rendering, and must release even on read failure.
 for _,failure in ipairs({'failGpuQuery','failGpuRead'}) do
-    M.show(desktop);MOCK[failure]=true;MOCK.press('F6')
+    M.show(desktop);MOCK[failure]=true;summon()
     assert(M.phase=='parked' and M.vehicle,'optional GPU diagnostics fail softly')
     for _,b in ipairs(MOCK.buffers) do assert(b.disposed,'release wrapper even when descriptor throws') end
     MOCK[failure]=nil;M.close(desktop)
@@ -199,7 +208,7 @@ end
 -- Partial allocations must release every owned mesh/texture/material and native handle.
 for _,failure in ipairs({'failTexture','failMesh','failGpuUpload','emptyUpload','mismatchUpload','failPrefab','unsafePrefab','prefabChild','ambiguousPrefab','failClone','missingColorPass'}) do
     local beforeClones=MOCK.cloneCount or 0
-    M.show(desktop);MOCK[failure]=true;MOCK.press('F6')
+    M.show(desktop);MOCK[failure]=true;summon()
     assert(not M.vehicle and not M.loader and not M.owned)
     for _,r in ipairs(MOCK.resources) do assert(r.destroyed,'no leaked asset on '..failure) end
     if failure=='unsafePrefab' or failure=='prefabChild' or failure=='ambiguousPrefab' then
@@ -232,7 +241,7 @@ for _,size in ipairs({.78,.93,1.12,1.24}) do
         end
     end
     local originals=state(rider);GameInstance.playerController.mainCharacter=rider
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease,'fitted size '..size)
+    M.show(desktop);summon();mount();assert(M.lease,'fitted size '..size)
     local l=M.lease
     forwardAngles[#forwardAngles+1]=l.neutral.angle
     assert(l.maxSteer>0 and l.maxSteer<=35,'reachable fork range without changing vehicle scale')
@@ -276,10 +285,10 @@ assert(forwardAngles[1]>forwardAngles[#forwardAngles]+10,'small bodies lean forw
 GameInstance.playerController.mainCharacter=ch
 -- Unrealistically large configured bikes fail before any bone/speed mutation;
 -- the chosen vehicle size is never silently reduced, and changing it recovers.
-M.show(desktop);MOCK.press('F6');assert(PUBLIC.set('motorcycle','scale',2))
-MOCK.press('F7');assert(not M.lease and M.faulted and M.visual.transform.localScale.x==2)
+M.show(desktop);summon();assert(PUBLIC.set('motorcycle','scale',2))
+mount();assert(not M.lease and M.faulted and M.visual.transform.localScale.x==2)
 restored(ch,original)
-assert(PUBLIC.set('motorcycle','scale',1.15));MOCK.press('F7');assert(M.lease)
+assert(PUBLIC.set('motorcycle','scale',1.15));mount();assert(M.lease)
 MOCK.run('TailTick');assert(PUBLIC.set('motorcycle','scale',2));MOCK.run('TailTick')
 assert(not M.lease and M.faulted and M.visual.transform.localScale.x==2,'impossible hot settings restore instead of stretching or shrinking')
 restored(ch,original);assert(PUBLIC.set('motorcycle','scale',1.15));M.close(desktop)
@@ -309,9 +318,9 @@ for _,hz in ipairs({30,120}) do
     local rider=MOCK.newCharacter();GameInstance.playerController.mainCharacter=rider
     local baseline=state(rider)
     MOCK.groundY=0;MOCK.groundSlope=nil
-    M.show(desktop);MOCK.press('F6');assert((MOCK.groundQueries or 0)>0)
+    M.show(desktop);summon();assert((MOCK.groundQueries or 0)>0)
     assert(not M.rootGroundReported)
-    MOCK.press('F7');assert(M.lease)
+    mount();assert(M.lease)
     local l=M.lease;MOCK.run('TailTick',1/hz)
     local yaw=l.bikeYaw;local wheel=l.rearAngle
     MOCK.setAxes(1,0)
@@ -361,7 +370,7 @@ print(string.format('Forward corner 30/120Hz: %.6f / %.6f deg',yawByRate[1],yawB
 for _,hz in ipairs({30,120}) do
     local rider=MOCK.newCharacter();GameInstance.playerController.mainCharacter=rider
     local baseline=state(rider)
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+    M.show(desktop);summon();mount();assert(M.lease)
     local l=M.lease;MOCK.run('TailTick',1/hz);MOCK.setAxes(.4,0)
     for _=1,hz*2 do MOCK.run('Tick',1/hz);MOCK.run('TailTick',1/hz) end
     local g=l.geometry;local radius=1/g.curvature
@@ -397,7 +406,7 @@ end
 do
     local rider=MOCK.newCharacter();GameInstance.playerController.mainCharacter=rider
     local baseline=state(rider)
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+    M.show(desktop);summon();mount();assert(M.lease)
     local l=M.lease;local radii={};local locks={}
     for _,angle in ipairs({10,22,35,50,10}) do
         assert(PUBLIC.set('motorcycle','max_steer',angle));MOCK.run('TailTick',1/60)
@@ -432,20 +441,20 @@ end
 
 -- Public nullable wrappers and partial-write/cleanup failures, foreign ownership.
 GameInstance.playerController.mainCharacter=ch;MOCK.groundY=nil
-MOCK.nullableWrapped=true;M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+MOCK.nullableWrapped=true;M.show(desktop);summon();mount();assert(M.lease)
 MOCK.run('Tick');M.close(desktop);restored(ch,original);MOCK.nullableWrapped=nil
 -- Replay the real 0.4.1 default-field-lookup failure before accepting the repair.
 local ctor=MOCK.character.movementComponent.input:GetType()
 assert(ctor:GetField('navMoveVector')==nil,'actual default lookup miss captured')
 for _,flag in ipairs({'nonpublicDriveField','enumeratedFieldOnly'}) do
-    MOCK[flag]=true;M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease,'explicit visibility/enumerated lookup '..flag)
+    MOCK[flag]=true;M.show(desktop);summon();mount();assert(M.lease,'explicit visibility/enumerated lookup '..flag)
     MOCK.run('Tick');M.close(desktop);MOCK[flag]=nil;restored(ch,original)
 end
-MOCK.readonlyDriveField=true;M.show(desktop);MOCK.press('F6');MOCK.press('F7')
+MOCK.readonlyDriveField=true;M.show(desktop);summon();mount()
 assert(not M.lease and M.faulted,'readonly drive field rejected before mutation')
 MOCK.readonlyDriveField=nil;M.close(desktop);restored(ch,original)
 -- A missing direct binding fails before mutation; no broken Invoke fallback.
-MOCK.hideDirectNav=true;M.show(desktop);MOCK.press('F6');MOCK.press('F7')
+MOCK.hideDirectNav=true;M.show(desktop);summon();mount()
 assert(not M.lease and M.faulted,'unavailable direct method rejects safely')
 MOCK.hideDirectNav=nil;M.close(desktop);restored(ch,original)
 -- Exact old Invoke failure is present in the fixture; production must never use it.
@@ -453,42 +462,42 @@ local flags=CS.System.Enum.Parse(typeof(CS.System.Reflection.BindingFlags),'Inst
 local invoke=ctor:GetMethod('NavMove',flags)
 local ok,err=pcall(function()invoke:Invoke(ch.movementComponent.input,CS.System.Array.CreateInstance(typeof(CS.System.Object),3))end)
 assert(not ok and err:find('invalid arguments to Invoke',1,true),'capture exact live Invoke rejection')
-MOCK.failRelease=1;M.show(desktop);MOCK.press('F6');local calls=MOCK.navCalls
-MOCK.press('F7');assert(not M.lease and M.faulted and MOCK.navCalls==calls,'failed null setter before acquiring persistent input')
+MOCK.failRelease=1;M.show(desktop);summon();local calls=MOCK.navCalls
+mount();assert(not M.lease and M.faulted and MOCK.navCalls==calls,'failed null setter before acquiring persistent input')
 M.close(desktop);restored(ch,original)
 MOCK.opaqueEmptyNullable=true
-M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease,'direct call with reflected nullable reads')
+M.show(desktop);summon();mount();assert(M.lease,'direct call with reflected nullable reads')
 local resolves=MOCK.fieldResolves;local methodResolves=MOCK.methodResolves
 for _=1,5 do MOCK.run('Tick') end
 assert(MOCK.fieldResolves==resolves and MOCK.methodResolves==methodResolves,'metadata cached per lease, no frame lookup')
 M.close(desktop);MOCK.opaqueEmptyNullable=nil;restored(ch,original)
 MOCK.throwDirectDrive=true
-M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease,'diagnostic direct getters cannot break valid reflected control')
+M.show(desktop);summon();mount();assert(M.lease,'diagnostic direct getters cannot break valid reflected control')
 MOCK.run('Tick');M.close(desktop);MOCK.throwDirectDrive=nil;restored(ch,original)
 for _,flag in ipairs({'missingDriveField','missingDriveMethod'}) do
-    MOCK[flag]=true;M.show(desktop);MOCK.press('F6');MOCK.press('F7')
+    MOCK[flag]=true;M.show(desktop);summon();mount()
     assert(not M.lease and M.faulted,'public contract failure before navigation write')
     restored(ch,original);MOCK[flag]=nil;M.close(desktop)
 end
 for _,failure in ipairs({'failNavBefore','failNavAfter'}) do
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+    M.show(desktop);summon();mount();assert(M.lease)
     MOCK[failure]=true;MOCK.setAxes(1,1);MOCK.run('Tick')
     assert(not M.lease and M.faulted);restored(ch,original)
     MOCK[failure]=nil;MOCK.setAxes(0,0);M.close(desktop)
 end
-M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+M.show(desktop);summon();mount();assert(M.lease)
 MOCK.failRelease=1;M.close(desktop);assert(#M.pending==1,'keep failed nullable cleanup for retry')
 MOCK.run('Tick');assert(#M.pending==0 and MOCK.countUpdates()==0);restored(ch,original)
 for _,field in ipairs({'navMoveVector','pendingNoManualMove','noManualMove'}) do
     local input=ch.movementComponent.input;local foreign=U.Vector3(.1,0,.9)
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+    M.show(desktop);summon();mount();assert(M.lease)
     input[field]=foreign;MOCK.run('Tick');assert(not M.lease and M.faulted)
     assert(vecNear(input[field],foreign),'never erase foreign '..field)
     input[field]=nil;M.close(desktop);restored(ch,original)
 end
 local input=ch.movementComponent.input
 input.navMoveVector=U.Vector3(1,0,0)
-M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(not M.lease and M.faulted)
+M.show(desktop);summon();mount();assert(not M.lease and M.faulted)
 assert(vecNear(input.navMoveVector,U.Vector3(1,0,0)),'refuse occupied input before mutation')
 input.navMoveVector=nil;M.close(desktop);restored(ch,original)
 -- Grade + braking/pitch at model yaw 0 AND 180; no one-wheel lift solution.
@@ -497,7 +506,7 @@ for _,yaw in ipairs({0,180}) do
     local baseline=state(rider)
     MOCK.groundY=-.07;MOCK.groundSlope=U.Vector3(.08,0,.18)
     assert(PUBLIC.set('motorcycle','model_yaw',yaw))
-    M.show(desktop);MOCK.press('F6');MOCK.press('F7');assert(M.lease)
+    M.show(desktop);summon();mount();assert(M.lease)
     for i=1,45 do
         rider.rootCom.transform.position=U.Vector3(0,0,i*.012)
         MOCK.run('TailTick',1/60)

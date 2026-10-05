@@ -1,7 +1,7 @@
 """Local-only Avatar/LOD0 linear skinning + actual production Lua pose preview.
 
 Requires existing numpy/Pillow/Lupa. Never packages extracted game data. This is
-offline geometry verification, not Unity cloth/animation or client acceptance.
+Offline geometry preview.
 """
 from pathlib import Path
 import argparse, json, struct, sys, base64, math
@@ -46,7 +46,7 @@ def make_runtime(lupa_dir, helper):
     lua.globals().mock_decode_asset=lambda s:base64.b64decode(s)
     data='local BIKE_MESH_BASE64="'+base64.b64encode((ROOT/'mod/assets/sidra-bike.zmlmesh').read_bytes()).decode()+'"\nlocal BIKE_TEXTURE_BASE64=""'
     # Only expose local functions in the offline harness; run their original bodies.
-    src=helper.replace('-- ZML_ASSET_DATA',data).replace('return M\n','M._visual=visual; M._control=control; M._capture=captureRig; M._plan=planPose; return M\n')
+    src=helper.replace('-- ZML_ASSET_DATA',data).replace('-- ZML_NATIVE_ACTIONS',(ROOT/'mod/native-actions.lua').read_text(encoding='utf8')).replace('return M\n','M._visual=visual; M._control=control; M._capture=captureRig; M._plan=planPose; return M\n')
     lua.globals().M=lua.execute(src)
     lua.execute('''M.api={report=function()end}; M.settings={enabled=true,scale=1.15,
         seat_height=.8,model_yaw=0,speed=10,acceleration=6,max_steer=35,render_comparison=false,
@@ -127,7 +127,7 @@ def render(geometry,target,title,view):
         polys+=list(zip(depth,xy,colors))
     for _,points,c in sorted(polys,key=lambda p:p[0]):draw.polygon([tuple(p)for p in points],fill=tuple(c))
     draw.line((0,880,960,880),fill=(90,90,90));draw.text((20,20),title,fill=(255,239,0))
-    draw.text((20,42),'Extracted LOD0 + production Lua / OFFLINE, not game/cloth acceptance',fill=(225,225,225))
+    draw.text((20,42),'LOD0 Rider Preview',fill=(225,225,225))
     target.parent.mkdir(parents=True,exist_ok=True);im.save(target)
 
 def main():
@@ -137,7 +137,7 @@ def main():
     helper=args.helper.read_text(encoding='utf8');parts=model_parts();results=[]
     for name in ('typhoea','chen','laevat','pograni'):
         lua=make_runtime(args.lupa_dir,helper);g=lua.globals();g.M.settings.max_steer=args.max_steer;nodes,ids,paths=extracted_rig(lua,args.research/name)
-        meshes=skins(args.research/name,nodes,ids);g.M.summon();assert g.M.vehicle,'offline model creation failed'
+        meshes=skins(args.research/name,nodes,ids);g.M.summon();g.M.finishPresentation();assert g.M.vehicle,'offline model creation failed'
         g.M.mount();assert g.M.lease,'offline mount failed'
         lengths={s+kind:[g.M.lease[s+kind][k]for k in ('l1','l2')]for s in ('left','right')for kind in ('Leg','Arm')}
         for state in args.states.split(','):

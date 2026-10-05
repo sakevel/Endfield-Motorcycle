@@ -30,3 +30,10 @@ Its license is retained beside the converter in the source repository.
 The runtime clones a material loaded normally by the user's installed game,
 uses only its compatible shader, and replaces base/normal/MRO textures with
 our own textures. No game meshes, textures, shaders or materials are distributed.
+
+# Mod UI icons
+The browser icon is original artwork generated with the built-in image tool,
+matching our other Mod emblems (broken grey hexagon, white glyph, yellow accent).
+The tool-wheel icon is an original code-native SVG with deliberately thick
+geometric shapes, rasterized by tools/export-icons.py. No game icons are shipped.
+These icons are independent of Sidra model attribution.

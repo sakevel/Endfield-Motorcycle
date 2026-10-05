@@ -7,7 +7,17 @@
 #include <iterator>
 namespace {
 const ZmlHost* hostApi{};
-std::string helper;
+std::string helper,wheel;
+int transformWheel(void*,const char* source,size_t size,ZmlSink sink,void* writer) noexcept {
+    try {
+        if(!source || !sink || size>768*1024)return 0;
+        std::string output;
+        if(!motorcycle::patchWheel(std::string_view(source,size),wheel,output)) {
+            hostApi->log(hostApi->owner,"GeneralAbilityCtrl contract rejected/already modified; native source retained");return 0;
+        }
+        sink(writer,output.data(),output.size());return 1;
+    } catch(...) {return 0;}
+}
 int transform(void*,const char* source,size_t size,ZmlSink sink,void* writer) noexcept {
     try {
         if(!source || !sink || size>768*1024) return 0;
@@ -36,9 +46,27 @@ int start(const ZmlHost* host) noexcept {
         constexpr std::string_view token="-- ZML_ASSET_DATA";
         if(motorcycle::count(bytes,token)!=1)return 0;
         bytes.replace(bytes.find(token),token.size(),"local BIKE_MESH_BASE64=\""+motorcycle::base64(mesh)+"\"\nlocal BIKE_TEXTURE_BASE64=\""+motorcycle::base64(texture)+"\"");
-        if(bytes.size()>720*1024)return 0;
+        auto readLua=[&](const wchar_t* filename) {
+            auto path=root/filename;
+            if(std::filesystem::file_size(path)>32*1024)throw std::runtime_error("native helper too large");
+            std::ifstream file(path,std::ios::binary);
+            std::string value{std::istreambuf_iterator<char>(file),{}};
+            if(!file || value.empty() || value.find('\0')!=value.npos)throw std::runtime_error("invalid native helper");
+            return value;
+        };
+        auto actions=readLua(L"native-actions.lua");
+        constexpr std::string_view nativeToken="-- ZML_NATIVE_ACTIONS";
+        if(motorcycle::count(bytes,nativeToken)!=1)return 0;
+        bytes.replace(bytes.find(nativeToken),nativeToken.size(),actions);
+        wheel=readLua(L"wheel.lua");
+        auto wheelIcon=motorcycle::readAsset(root/L"wheel-icon.png",16*1024);
+        constexpr std::string_view wheelToken="-- ZML_WHEEL_ICON_DATA";
+        if(motorcycle::count(wheel,wheelToken)!=1 || wheelIcon.substr(0,8)!=std::string("\x89PNG\r\n\x1a\n",8))return 0;
+        wheel.replace(wheel.find(wheelToken),wheelToken.size(),"local WHEEL_ICON_BASE64=\""+motorcycle::base64(wheelIcon)+"\"");
+        if(bytes.size()>744*1024 || wheel.size()>48*1024)return 0;
         helper=std::move(bytes);hostApi=host;
-        return host->transform_lua(host->owner,"UI/Panels/BattleAction/BattleActionCtrl",transform,nullptr);
+        return host->transform_lua(host->owner,"UI/Panels/BattleAction/BattleActionCtrl",transform,nullptr) &&
+            host->transform_lua(host->owner,"UI/Panels/GeneralAbility/GeneralAbilityCtrl",transformWheel,nullptr);
     } catch(...) {return 0;}
 }
 const ZmlPlugin plugin{sizeof(ZmlPlugin),1,"motorcycle",start};

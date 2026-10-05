@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Original simple glyph; thick features remain readable at 32 pixels. -->
+  <g fill="#ffffff">
+    <circle cx="62" cy="165" r="33" fill="none" stroke="#ffffff" stroke-width="15"/>
+    <circle cx="194" cy="165" r="33" fill="none" stroke="#ffffff" stroke-width="15"/>
+    <polygon points="39,109 80,109 94,121 119,121 139,101 165,101 174,126 148,150 94,150 76,130 48,130"/>
+    <polygon points="87,145 107,145 81,173 56,173 56,158 74,158"/>
+    <polygon points="151,76 174,76 204,163 190,168 163,92 151,92"/>
+    <polygon points="175,103 196,103 200,121 182,121"/>
+  </g>
+</svg>

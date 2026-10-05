@@ -9,15 +9,17 @@
 #include <iterator>
 #include <stdexcept>
 namespace {
-ZmlLuaTransform registered{};
+ZmlLuaTransform registered{},wheelRegistered{};
 void* data{};
 int registrations{},sinks{};
 std::string output;
 void expect(bool value,const char* name){if(!value)throw std::runtime_error(name);}
 void log(void*,const char*){}
 int registerLua(void*,const char* path,ZmlLuaTransform cb,void* userdata){
-    expect(std::string_view(path)=="UI/Panels/BattleAction/BattleActionCtrl","canonical module");
-    ++registrations;registered=cb;data=userdata;return 1;
+    auto name=std::string_view(path);
+    expect(name=="UI/Panels/BattleAction/BattleActionCtrl" || name=="UI/Panels/GeneralAbility/GeneralAbilityCtrl","canonical module");
+    ++registrations;if(name=="UI/Panels/BattleAction/BattleActionCtrl")registered=cb;else wheelRegistered=cb;
+    data=userdata;return 1;
 }
 void sink(void*,const char* bytes,size_t count){++sinks;output.assign(bytes,count);}
 std::string read(const std::filesystem::path& path){
@@ -41,7 +43,7 @@ return BattleActionCtrl
 }
 int main(int argc,char** argv){
     try {
-        expect(argc==2 || argc==4,"usage: ContractTests <DLL> [current-client.lua patched-output.lua]");
+        expect(argc==2 || argc==4 || argc==6,"usage: ContractTests <DLL> [battle.lua battle-output.lua [ability.lua ability-output.lua]]");
         auto dll=std::filesystem::absolute(argv[1]);
         auto module=LoadLibraryW(dll.c_str());expect(module!=nullptr,"actual DLL load");
         auto entry=reinterpret_cast<ZmlPluginEntry>(GetProcAddress(module,"ZML_PluginV1"));expect(entry!=nullptr,"ABI export");
@@ -59,7 +61,7 @@ int main(int argc,char** argv){
         auto missingHost=host;missingHost.mod_directory="Z:/nonexistent-zml-test-directory";
         expect(plugin->start(&missingHost)==0&&registrations==0,"missing runtime assets refuse before registration");
         expect(plugin->start(nullptr)==0,"reject null host");auto wrong=host;wrong.abi=2;expect(plugin->start(&wrong)==0,"reject ABI drift");
-        expect(plugin->start(&host)==1 && registrations==1 && registered,"actual plugin registration");
+        expect(plugin->start(&host)==1 && registrations==2 && registered && wheelRegistered,"actual plugin registration");
         auto temp=dll.parent_path().parent_path().parent_path()/L"asset-test-fixture";
         expect(!std::filesystem::exists(temp),"exclusive asset fixture");
         std::filesystem::create_directories(temp/L"assets");
@@ -68,7 +70,7 @@ int main(int argc,char** argv){
         bad=asset;bad[96]^=1;expect(motorcycle::validMesh(bad),"structurally valid corrupted mesh fixture");
         {std::ofstream file(temp/L"assets/sidra-bike.zmlmesh",std::ios::binary);file.write(bad.data(),bad.size());}
         auto dir=temp.u8string();auto corruptedHost=host;corruptedHost.mod_directory=reinterpret_cast<const char*>(dir.c_str());
-        expect(plugin->start(&corruptedHost)==0&&registrations==1,"hash mismatch rejects before registration");
+        expect(plugin->start(&corruptedHost)==0&&registrations==2,"hash mismatch rejects before registration");
         std::filesystem::remove(temp/L"assets/sidra-bike.zmlmesh");
         std::filesystem::remove(temp/L"assets/Textures.png");std::filesystem::remove(temp/L"assets");
         std::filesystem::remove(temp/L"motorcycle.lua");std::filesystem::remove(temp);
@@ -87,10 +89,54 @@ int main(int argc,char** argv){
         }
         sinks=0;expect(registered(data,nullptr,0,sink,nullptr)==0 && sinks==0,"null source");
         auto binary=source;binary[1]='\0';expect(registered(data,binary.data(),binary.size(),sink,nullptr)==0,"reject binary");
-        if(argc==4){
+        if(argc>=4){
             auto real=read(argv[2]);sinks=0;expect(registered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current client patch");
             expect(!std::filesystem::exists(argv[3]),"do not overwrite research outputs");
             std::ofstream file(argv[3],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write research output");
+        }
+        const std::string wheelSource=R"(GeneralAbilityCtrl = HL.Class('GeneralAbilityCtrl', uiCtrl.UICtrl)
+GeneralAbilityCtrl._UpdateNormalAbilityData = HL.Method() << function(self)
+    for index=1,5 do
+        self.m_abilityDataList[index].index = index)" "  \n" R"(    end
+
+end
+GeneralAbilityCtrl._UpdateTempAbilityData = HL.Method() << function(self)
+end
+GeneralAbilityCtrl._UpdateSelectorCellInfo = HL.Method(HL.Any, HL.Number) << function(self, cell, luaIndex)
+end
+GeneralAbilityCtrl._OnSelectByType = HL.Method(HL.Number) << function(self, type)
+end
+GeneralAbilityCtrl._SetSelectedType = HL.Method(HL.Number, HL.Boolean) << function(self, type, needSave)
+end
+GeneralAbilityCtrl._RefreshMidHoverInfo = HL.Method(HL.Number) << function(self, type)
+end
+GeneralAbilityCtrl._RefreshWheelShownState = HL.Method(HL.Boolean) << function(self, isShown)
+end
+GeneralAbilityCtrl.OnClose = HL.Override() << function(self)
+end
+if data ~= nil and data.isForbidSelect == false then
+end
+HL.Commit(GeneralAbilityCtrl)
+)";
+        sinks=0;expect(wheelRegistered(data,wheelSource.data(),wheelSource.size(),sink,nullptr)==1 && sinks==1,"atomic native wheel transform");
+        expect(output.find("local WHEEL_ICON_BASE64=")!=output.npos && output.find("ZMLBikeWheel.register(self)")!=output.npos,"wheel packaged icon and registration");
+        expect(!motorcycle::patchWheel(output,"return {}",untouched),"wheel idempotence");
+        auto mixed=wheelSource;
+        for(size_t p=0;(p=mixed.find('\n',p))!=mixed.npos;p+=2)mixed.insert(p,"\r");
+        auto comment=mixed.find("index  \r\n");mixed.erase(comment+7,1);
+        sinks=0;expect(wheelRegistered(data,mixed.data(),mixed.size(),sink,nullptr)==1 && sinks==1,"mixed LF/CRLF native wheel source");
+        for(auto anchor:{"HL.Commit(GeneralAbilityCtrl)","GeneralAbilityCtrl._OnSelectByType = HL.Method(HL.Number) << function(self, type)",
+            "GeneralAbilityCtrl.OnClose = HL.Override() << function(self)","if data ~= nil and data.isForbidSelect == false then",
+            "        self.m_abilityDataList[index].index = index  \n    end\n\nend"}) {
+            auto missing=wheelSource;missing.erase(missing.find(anchor),strlen(anchor));
+            sinks=0;expect(wheelRegistered(data,missing.data(),missing.size(),sink,nullptr)==0 && sinks==0,"wheel missing anchor atomic refusal");
+            auto duplicate=wheelSource+"\n"+anchor;
+            expect(wheelRegistered(data,duplicate.data(),duplicate.size(),sink,nullptr)==0 && sinks==0,"wheel duplicate anchor atomic refusal");
+        }
+        if(argc==6){
+            auto real=read(argv[4]);sinks=0;expect(wheelRegistered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current native R wheel patch");
+            expect(!std::filesystem::exists(argv[5]),"exclusive wheel output");
+            std::ofstream file(argv[5],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write wheel output");
         }
         // The callback/host live for the process. Do not unload a registered plugin mid-test.
         std::cout<<"PASS: actual ABI1 DLL, lifecycle contract, atomic failure, lexical scope\n";

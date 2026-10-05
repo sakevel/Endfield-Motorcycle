@@ -60,7 +60,7 @@ local function config()
     local v=assert(api().get(ID))
     local c={enabled=v.enabled=="true",scale=tonumber(v.scale),speed=tonumber(v.speed),
         acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),render_comparison=v.render_comparison=="true",
-        summon_key=v.summon_key,mount_key=v.mount_key,dismiss_key=v.dismiss_key}
+        mount_key=v.mount_key}
     assert(c.scale and c.speed and c.acceleration and c.max_steer and c.max_steer>=10 and c.max_steer<=50 and c.seat_height and c.model_yaw,"configuration unavailable")
     return c
 end
@@ -101,6 +101,8 @@ local function setScale()
     M.visual.transform.localScale=V(scale,scale,scale)
     M.visual.transform.localRotation=Q.Euler(0,c.model_yaw,0)
     M.visual.transform.localPosition=V(0,0,0)
+    if M.collisionScale~=scale then M.collisionScale=scale;M.collisionArmed=nil end
+    M.syncCollision()
     syncProbes()
 end
 local function own(object)
@@ -113,7 +115,14 @@ local function newObject(name)
     M.objects=M.objects or {};M.objects[#M.objects+1]=object
     return object
 end
+-- ZML_NATIVE_ACTIONS
 local function destroyVehicle()
+    M.removeInteraction();M.stopEffects(true);M.renderHelper=nil;M.effectAssets=nil;M.effectNames=nil
+    M.renderTemplate=nil
+    if live(M.bodyCollider) then M.bodyCollider.enabled=false end
+    M.bodyCollider,M.collisionHits,M.collisionOverlaps=nil,nil,nil
+    M.collisionArmed=nil
+    M.collisionScale=nil
     -- Track even objects whose SetParent subsequently failed; no orphaned partial model.
     for i=#(M.objects or {}),1,-1 do pcall(U.Object.Destroy,M.objects[i]) end
     -- Runtime-generated meshes/textures/material clones are not loader handles.
@@ -562,7 +571,7 @@ local function groundPlane(mover,pos,wheel,fallback)
         for i=0,count-1 do
             local hit=M.groundHits[i]
             local point,normal=hit.point,hit.normal
-            if normal.y>.45 and math.abs(point.y-pos.y)<.65 and
+            if (not hit.collider or foreignCollider(hit.collider)) and normal.y>.45 and math.abs(point.y-pos.y)<.65 and
                 (not best or point.y>best.point.y) then best={point=copy(point),normal=normal.normalized} end
         end
         return best
@@ -624,6 +633,7 @@ end
 function M.unmount(quiet)
     local lease=M.lease
     M.lease=nil
+    if lease then M.collisionArmed=nil end
     if M.vehicle then M.phase="parked" else M.phase="absent" end
     syncProbes()
     for _,part in ipairs(M.parts or {}) do
@@ -647,10 +657,12 @@ end
 local function fail(event,err)
     M.faulted=true -- A contract failure must not produce a toast/error every frame.
     M.unmount(true)
+    M.removeInteraction();M.finishPresentation();M.requestedToggle=nil
     warnEvent(event,err)
     notice("摩托车操作失败，已恢复角色；请查看模组日志")
 end
 function M.summon()
+    if M.presentation then notice("请等待摩托车操作完成") return end
     if M.phase=="mounted" then notice("请先下车") return end
     local ch,pc,mover,root=character()
     if not ch or not gameAllowed(pc) or not groundAllowed(mover) or #M.pending>0 then
@@ -660,7 +672,7 @@ function M.summon()
     if M.vehicle then
         M.vehicle.transform:SetPositionAndRotation(root.transform.position,root.transform.rotation)
         M.visibilityFrames=0;M.probeCheck=0
-        setScale();seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0);probeState();notice(M.settings.render_comparison and "渲染对照已重定位：先不要上车，请截图四个位置" or "摩托车已移到身边");return
+        setScale();seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0);probeState();M.beginPresentation(false);notice(M.settings.render_comparison and "渲染对照已重定位：先不要上车，请截图四个位置" or "摩托车已移到身边");return
     end
     local ok,err=pcall(function()
         M.loader=require_ex("Common/Utils/LuaResourceLoader").LuaResourceLoader()
@@ -678,7 +690,9 @@ function M.summon()
         M.visual=newObject("ZML_Bike_Model")
         M.visual.layer=M.vehicle.layer
         M.visual.transform:SetParent(M.vehicle.transform,false)
-        buildModel(material,visualTemplate())
+        M.renderTemplate=visualTemplate()
+        buildModel(material,M.renderTemplate)
+        M.createCollision()
         setScale()
         M.vehicle.transform:SetPositionAndRotation(root.transform.position,root.transform.rotation)
         seatVehicle(mover,root.transform.position,root.transform.rotation,0,0,0)
@@ -689,7 +703,8 @@ function M.summon()
         if M.settings.render_comparison then report("render_comparison_ready") end
     end)
     if not ok then destroyVehicle();warnEvent("model_load_failed",err);notice("自带摩托车模型加载失败，未修改角色") return end
-    report("summoned");notice(M.settings.render_comparison and "渲染对照：前左原生/原材质，前右原生/自材质，后左自带/原材质，脚边自带/自材质；请先截图" or "摩托车已召唤；按 "..M.settings.mount_key.." 上车")
+    M.beginPresentation(false)
+    report("summoned");notice(M.settings.render_comparison and "渲染对照：前左原生/原材质，前右原生/自材质，后左自带/原材质，脚边自带/自材质；请先截图" or "摩托车已召唤；靠近后使用原生交互骑乘")
 end
 local boneNames={"pelvis","leftThigh","leftCalf","leftFoot","rightThigh","rightCalf","rightFoot",
     "leftUpperArm","leftForearm","leftHand","rightUpperArm","rightForearm","rightHand","head"}
@@ -920,7 +935,7 @@ local function speed(lease,braking)
     lease.braking=braking
     local c=M.settings
     local desired=braking and 0 or (lease.throttle or 0)<0 and math.min(c.speed,3) or c.speed
-    local accel=braking and math.max(12,c.acceleration) or c.acceleration
+    local accel=lease.collisionBlocked and 96 or braking and math.max(12,c.acceleration) or c.acceleration
     if lease.speed==desired and lease.speedAccel==accel then return end
     -- Acquire before dropping the old handle; on exception all our handles are still tracked.
     local h=lease.mover:SetOverrideSpeed(desired,accel)
@@ -955,17 +970,19 @@ local function control(lease,pc,dt)
     local predictor=(lease.velocity or 0)*lease.geometry.curvature*dt*.5
     local yaw=lease.bikeYaw+math.deg(lease.geometry.beta+predictor)
     lease.motionDirection=Q.Euler(0,yaw,0)*V(0,0,1)
-    speed(lease,U.Input.GetKey(U.KeyCode.LeftControl))
+    y=M.collisionThrottle(lease,y,dt)
+    speed(lease,lease.collisionBlocked or U.Input.GetKey(U.KeyCode.LeftControl))
     queueDrive(lease,lease.motionDirection*(lease.braking and 0 or y))
 end
 function M.mount()
     if M.phase=="mounted" then M.unmount(false) return end
-    if not M.vehicle then notice("先按 "..M.settings.summon_key.." 召唤摩托车") return end
+    if not M.vehicle then notice("请先在 R 工具轮盘召唤摩托车") return end
+    if M.phase~="parked" or M.presentation then notice("请等待摩托车放置完成") return end
     local ch,pc,mover,root=character()
     if not ch or not gameAllowed(pc) or not groundAllowed(mover) or #M.pending>0 then
         report("mount_blocked");notice("当前不能骑乘：请在普通地面、非战斗且可操作时重试") return
     end
-    if distance(root.transform.position,M.vehicle.transform.position)>3.5*M.settings.scale then notice("请靠近摩托车") return end
+    if distance(root.transform.position,M.vehicle.transform.position)>3.5 then notice("请靠近摩托车") return end
     local lease
     local ok,err=pcall(function()
         lease=captureRig(ch,mover,root) -- All validation happens before any character mutation.
@@ -992,6 +1009,7 @@ function M.mount()
         if live(lease.grounder) then lease.grounder.enabled=false end
         speed(lease,false)
         M.phase="mounted"
+        M.removeInteraction();M.syncCollision()
         setScale()
         syncProbes()
     end)
@@ -1115,19 +1133,20 @@ end
 local function tick(dt)
     dt=clamp(dt or 1/60,0,.1)
     retryCleanup()
+    if M.interactRemovalPending then M.removeInteraction() end
     visibilityCheck()
     if M.faulted or not M.settings or not M.settings.enabled or #M.pending>0 then return end
     if not M.tickSeen then M.tickSeen=true;report("tick_active") end
-    if not U.Application.isFocused or typing() then M.unmount(true) return end
+    if not U.Application.isFocused or typing() then M.removeInteraction();M.unmount(true);M.finishPresentation();M.requestedToggle=nil;return end
     local input=U.Input
     local action
-    if input.GetKeyDown(U.KeyCode[M.settings.dismiss_key]) then action="dismiss"
-    elseif input.GetKeyDown(U.KeyCode[M.settings.summon_key]) then action="summon"
-    elseif input.GetKeyDown(U.KeyCode[M.settings.mount_key]) then action="mount" end
-    if action then report("hotkey_"..action) end
+    -- Only dismount keeps a dedicated key. Summon/retract use the native wheel;
+    -- boarding uses InteractOption and its normal common_interact binding.
+    if M.phase=="mounted" and input.GetKeyDown(U.KeyCode[M.settings.mount_key]) then action="dismount" end
+    M.nativeUpdate(dt)
     local ch,pc,mover=character()
     if not ch or not gameAllowed(pc) then
-        M.unmount(true)
+        M.removeInteraction();M.unmount(true);M.finishPresentation()
         if action then
             report(ch and "hotkey_blocked_game" or "hotkey_blocked_character")
             notice("当前不能操作摩托车：请返回普通探索界面并脱离战斗")
@@ -1140,9 +1159,7 @@ local function tick(dt)
         if not ok then warnEvent("drive_probe_failed",err) end
     end
     if M.lease and (ch~=M.lease.char or not groundAllowed(mover)) then M.unmount(true) end
-    if action=="dismiss" then M.dismiss(false)
-    elseif action=="summon" then M.summon()
-    elseif action=="mount" then M.mount() end
+    if action=="dismount" then M.unmount(false) end
     if M.lease then control(M.lease,pc,dt) end
 end
 local function guarded(fn,event,...)
@@ -1154,12 +1171,13 @@ local function removeUpdates()
     M.keys={}
 end
 local function ensureCleanupUpdate()
-    if #M.pending==0 then return end
+    if #M.pending==0 and not M.interactRemovalPending then return end
     if M.cleanupKey then return end
     M.cleanupKey=LuaUpdate:Add("Tick",function()
         local ok=pcall(retryCleanup)
         if not ok then warnEvent("cleanup_failed") end
-        if #M.pending==0 then M.cleanupKey=nil return true end
+        if M.interactRemovalPending then M.removeInteraction() end
+        if #M.pending==0 and not M.interactRemovalPending then M.cleanupKey=nil return true end
     end)
 end
 function M.show(ctrl)
@@ -1195,17 +1213,23 @@ function M.show(ctrl)
 end
 function M.hide(ctrl)
     if M.owner~=ctrl then return end
-    removeUpdates();M.unmount(true)
+    removeUpdates();M.removeInteraction();M.unmount(true);M.finishPresentation()
     if M.unsub then pcall(M.unsub);M.unsub=nil end
     M.owner=nil
+    M.syncCollision()
     syncProbes()
     ensureCleanupUpdate()
 end
 function M.close(ctrl)
     -- A hidden/non-owner prefab must not destroy the active owner's vehicle.
     if M.owner~=ctrl and (M.owner~=nil or M.lastOwner~=ctrl) then return end
-    M.hide(ctrl);M.dismiss(true)
+    M.hide(ctrl);M.dismiss(true);M.requestedToggle=nil
     M.lastOwner=nil
     ensureCleanupUpdate()
 end
+-- Private module bridge for this Mod's two source transforms, not a loader hook.
+local bridgeName="ZML/Motorcycle"
+assert(not hg.loadedModules[bridgeName],"motorcycle namespace already occupied")
+hg.loadedModules[bridgeName]={name=bridgeName,env={Motorcycle=M}}
+hg.loadedModuleNameList[#hg.loadedModuleNameList+1]=bridgeName
 return M
