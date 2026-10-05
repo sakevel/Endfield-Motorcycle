@@ -1,0 +1,5 @@
+/build/
+/dist/
+/artifacts/
+/.idea/
+__pycache__/

@@ -1,0 +1,12 @@
+Body 003 / Textures role=0 textured=1 vertices=15022 triangles=11518 pivot=0.120914,0.0179402,-0.0814423
+Body 003 / black_m role=0 textured=0 vertices=439 triangles=314 pivot=0.120914,0.0179402,-0.0814423
+Body 004 / Textures role=0 textured=1 vertices=2828 triangles=2546 pivot=0.0272211,0.405676,-0.119227
+Body 004 / black_m role=0 textured=0 vertices=146 triangles=120 pivot=0.0272211,0.405676,-0.119227
+Steer001 / Textures role=3 textured=1 vertices=4415 triangles=3813 pivot=-0.060824,0.847436,0.474309
+Steer001 / black_m role=3 textured=0 vertices=932 triangles=558 pivot=-0.060824,0.847436,0.474309
+Jack001 / Textures role=4 textured=1 vertices=75 triangles=49 pivot=-0.124412,0.230385,-0.093212
+Wheel_B001 / Textures role=1 textured=1 vertices=1489 triangles=1186 pivot=0.00611245,0.322589,-0.697655
+Wheel_B001 / Mat Wheel role=1 textured=0 vertices=1352 triangles=934 pivot=0.00611245,0.322589,-0.697655
+Wheel_F001 / Textures role=2 textured=1 vertices=1144 triangles=1044 pivot=-0.00611245,0.317881,0.789442
+Wheel_F001 / Mat Wheel role=2 textured=0 vertices=1362 triangles=934 pivot=-0.00611245,0.317881,0.789442
+total vertices=29204 triangles=23016 dimensions=0.829261,1.36949,2.2

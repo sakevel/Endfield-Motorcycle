@@ -1,0 +1,38 @@
+{
+  "sourceSHA256": "2e5e8c8255b51cd9df16b4f7c1a398ef52b22decc9a24e6be9359470bd9b8322",
+  "resultSHA256": "c687c78b809f42c769ad198b0e1780102ae72bb98a3f84f165057d1d7cab206f",
+  "originalRearAxis": [
+    0.9805761508117198,
+    0.19613875817092127,
+    -1.56217735616511e-06
+  ],
+  "originalFrontAxis": [
+    0.9395149614257398,
+    0.22432994487931224,
+    0.2588198467807974
+  ],
+  "wheelAxes": [
+    1,
+    0,
+    0
+  ],
+  "rearRadius": 0.31896371536901735,
+  "frontRadius": 0.31896816633024144,
+  "rearPivot": [
+    -0.025557319761754228,
+    0.3189836919720058,
+    -0.7003807751972188
+  ],
+  "frontPivot": [
+    0.02555731976175424,
+    0.31898814293077205,
+    0.7810290642132035
+  ],
+  "scale": 0.9930052077463059,
+  "notes": "Circular rim fit; fork rest straightened; chassis upright/grounded. UV/index/material counts unchanged.",
+  "steerPivot": [
+    0.011486594565212727,
+    0.8442755937576294,
+    0.462848424911499
+  ]
+}
