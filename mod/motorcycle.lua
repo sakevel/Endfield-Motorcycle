@@ -59,9 +59,9 @@ end
 local function config()
     local v=assert(api().get(ID))
     local c={enabled=v.enabled=="true",scale=tonumber(v.scale),speed=tonumber(v.speed),
-        acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),render_comparison=v.render_comparison=="true",
+        acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),speed_steer_reduction=tonumber(v.speed_steer_reduction),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),render_comparison=v.render_comparison=="true",
         mount_key=v.mount_key}
-    assert(c.scale and c.speed and c.acceleration and c.max_steer and c.max_steer>=10 and c.max_steer<=50 and c.seat_height and c.model_yaw,"configuration unavailable")
+    assert(c.scale and c.speed and c.acceleration and c.max_steer and c.max_steer>=10 and c.max_steer<=50 and c.speed_steer_reduction and c.speed_steer_reduction>=0 and c.speed_steer_reduction<=1 and c.seat_height and c.model_yaw,"configuration unavailable")
     return c
 end
 local function character()
@@ -959,8 +959,11 @@ local function control(lease,pc,dt)
     -- stationary lock would leave the old huge moving turning radius intact.
     -- This is a kinematic bicycle, not a full tyre/slip/dynamic balance simulator.
     local lateralBudget=3*lease.maxSteer/22
-    local limit=math.min(lease.maxSteer,math.deg(math.atan((BIKE.front.z-BIKE.rear.z)*c.scale*lateralBudget/
+    local speedLimit=math.min(lease.maxSteer,math.deg(math.atan((BIKE.front.z-BIKE.rear.z)*c.scale*lateralBudget/
         math.max((lease.velocity or 0)^2,1))))
+    -- 0 keeps reachable full lock; 1 reproduces the previous speed limiter.
+    -- Read live settings: no costly pose refit or mount reset for this scalar.
+    local limit=lease.maxSteer+(speedLimit-lease.maxSteer)*M.settings.speed_steer_reduction
     lease.steer,lease.steerVelocity=spring(lease.steer or 0,lease.steerVelocity or 0,x*limit,dt,12)
     lease.steer=clamp(lease.steer,-lease.maxSteer,lease.maxSteer)
     lease.geometry=turnGeometry(c.scale,lease.steer)

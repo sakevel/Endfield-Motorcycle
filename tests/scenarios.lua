@@ -35,6 +35,10 @@ assert(PUBLIC.get('motorcycle').max_steer=='35','larger fork lock default')
 for _,value in ipairs({9,51,35.5,'invalid'}) do
     assert(not PUBLIC.set('motorcycle','max_steer',value),'steering schema rejects invalid values')
 end
+assert(tonumber(PUBLIC.get('motorcycle').speed_steer_reduction)==.5,'weaker default speed reduction')
+for _,value in ipairs({-.05,1.05,.53,'invalid'}) do
+    assert(not PUBLIC.set('motorcycle','speed_steer_reduction',value),'reduction schema rejects invalid values')
+end
 assert(not PUBLIC.set('motorcycle','scale',2.1))
 assert(not PUBLIC.set('motorcycle','speed',9.3))
 M.show({isDefaultPanel=false});assert(MOCK.countUpdates()==0)
@@ -436,6 +440,45 @@ do
     assert(radii[35]<radii[22]*.8,'setting tightens moving radius, not only stationary steering')
     print(string.format('Steering 10m/s: 22deg radius %.3fm -> 35deg %.3fm; fitted locks %.2f / %.2f',radii[22],radii[35],locks[22],locks[35]))
     assert(PUBLIC.set('motorcycle','max_steer',35));MOCK.setAxes(0,0)
+    M.close(desktop);restored(rider,baseline)
+end
+
+-- Speed reduction is a live scalar, not a cosmetic fork-only adjustment.
+do
+    local rider=MOCK.newCharacter();GameInstance.playerController.mainCharacter=rider
+    local baseline=state(rider)
+    M.show(desktop);summon();mount();assert(M.lease)
+    local l=M.lease;local angles,radii={},{}
+    for _,strength in ipairs({1,.5,0,1}) do
+        local neutral=l.neutral
+        assert(PUBLIC.set('motorcycle','speed_steer_reduction',strength))
+        assert(M.settings.speed_steer_reduction==strength,'public save updates live value')
+        for _,side in ipairs({-1,1}) do
+            for _,velocity in ipairs({0,2,10,18,-3}) do
+                MOCK.setAxes(side,velocity<0 and -1 or velocity==0 and 0 or 1)
+                for _=1,75 do
+                    MOCK.run('Tick',1/60);MOCK.nativeStep(1/60,velocity);MOCK.run('TailTick',1/60)
+                end
+                assert(M.lease==l and l.neutral==neutral,'strength update does not remount or refit')
+                local oldLimit=math.min(l.maxSteer,math.deg(math.atan((.7810290642+.7003807752)*1.15*(3*l.maxSteer/22)/math.max(l.velocity^2,1))))
+                local expected=l.maxSteer+(oldLimit-l.maxSteer)*strength
+                assert(math.abs(l.steer-side*expected)<.005,'settled live steering matches reduction curve')
+                assert(math.abs(l.steer)<=l.maxSteer and l.geometry.curvature==l.geometry.curvature,'reachable finite steering')
+                assert(l.geometry.curvature*side>0,'same-sign real arc, not fork-only visual change')
+                for _,hand in ipairs({'left','right'}) do for _,kind in ipairs({'Arm','Leg'}) do
+                    local chain=l[hand..kind]
+                    assert((chain.c.position-l.targets[hand..kind]).magnitude<.015,'weaker limiter preserves grip/peg contact')
+                end end
+                for _,gap in pairs(meshGroundGaps()) do assert(math.abs(gap)<1e-5,'weaker limiter preserves tread support') end
+                if velocity==0 then assert(math.abs(math.abs(l.steer)-l.maxSteer)<.005,'stationary full lock independent of strength') end
+                if side==1 and velocity==10 then angles[strength]=math.abs(l.steer);radii[strength]=1/math.abs(l.geometry.curvature) end
+            end
+        end
+    end
+    assert(angles[0]>angles[.5] and angles[.5]>angles[1],'less reduction retains larger high-speed angle')
+    assert(radii[.5]<radii[1]*.5 and radii[0]<radii[.5],'default substantially tightens actual turning curve')
+    print(string.format('Speed reduction 10m/s: old %.3fdeg/%.3fm -> default %.3fdeg/%.3fm -> off %.3fdeg/%.3fm',angles[1],radii[1],angles[.5],radii[.5],angles[0],radii[0]))
+    assert(PUBLIC.set('motorcycle','speed_steer_reduction',.5));MOCK.setAxes(0,0)
     M.close(desktop);restored(rider,baseline)
 end
 

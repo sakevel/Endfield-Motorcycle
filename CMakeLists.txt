@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(EndfieldMotorcycle VERSION 0.5.5 LANGUAGES CXX)
+project(EndfieldMotorcycle VERSION 0.5.6 LANGUAGES CXX)
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Windows x64 required")
 endif()
