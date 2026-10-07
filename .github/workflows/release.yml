@@ -1,0 +1,122 @@
+name: Build and Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Mod Repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Mod
+        run: powershell -ExecutionPolicy Bypass -File .\tools\build.ps1
+
+      - name: Package Mod
+        id: package
+        run: |
+          $zip = powershell -ExecutionPolicy Bypass -File .\tools\package.ps1
+          $shaFile = $zip + ".sha256"
+          $sha = (Get-Content $shaFile).Split()[0]
+          echo "ZIP_PATH=$zip" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=$(Split-Path $zip -Leaf)" >> $env:GITHUB_ENV
+          echo "ZIP_SHA=$sha" >> $env:GITHUB_ENV
+
+      - name: Create or Upload Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} "$env:ZIP_PATH" "$env:ZIP_PATH.sha256" --title "${{ github.ref_name }}" --generate-notes
+
+      - name: Checkout Mod Index Repository
+        uses: actions/checkout@v4
+        with:
+          repository: sakevel/Endfield-ModIndex
+          token: ${{ secrets.INDEX_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+          path: mod-index
+
+      - name: Update Mod Index and Submit PR
+        env:
+          GH_TOKEN: ${{ secrets.INDEX_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          python -c @"
+          import json, os, configparser
+
+          ini = configparser.ConfigParser()
+          ini.read('mod/mod.ini', encoding='utf-8')
+          sec = ini['mod']
+
+          mod_id = sec.get('id', 'sample-mod')
+          mod_name = sec.get('name', '示例模组')
+          mod_ver = sec.get('version', '0.1.0')
+          mod_desc = sec.get('description', '')
+          mod_authors = sec.get('authors', '永动接线器')
+          mod_tags = [t.strip() for t in sec.get('tags', '').split(',') if t.strip()]
+          mod_depends = [d.strip() for d in sec.get('depends', '').split(',') if d.strip()]
+
+          zip_name = os.environ['ZIP_NAME']
+          sha256 = os.environ['ZIP_SHA']
+          repo = os.environ['GITHUB_REPOSITORY']
+          ref = os.environ['GITHUB_REF_NAME']
+          asset_url = f'https://github.com/{repo}/releases/download/{ref}/{zip_name}'
+          icon_url = f'https://raw.githubusercontent.com/{repo}/main/mod/icon.png' if os.path.exists('mod/icon.png') else ''
+
+          index_path = 'mod-index/index.json'
+          with open(index_path, 'r', encoding='utf-8') as f:
+              index_data = json.load(f)
+
+          entry = {
+              'id': mod_id,
+              'name': mod_name,
+              'version': mod_ver,
+              'description': mod_desc,
+              'authors': mod_authors,
+              'tags': mod_tags,
+              'repo_url': f'https://github.com/{repo}',
+              'asset_url': asset_url,
+              'sha256': sha256,
+              'depends': mod_depends,
+              'icon': icon_url
+          }
+
+          mods = index_data.get('mods', [])
+          updated = False
+          for i, m in enumerate(mods):
+              if m.get('id') == mod_id:
+                  mods[i] = entry
+                  updated = True
+                  break
+          if not updated:
+              mods.append(entry)
+
+          index_data['mods'] = mods
+          index_data['total'] = len(mods)
+
+          with open(index_path, 'w', encoding='utf-8') as f:
+              json.dump(index_data, f, ensure_ascii=False, indent=2)
+          print(f'Updated index for {mod_id} v{mod_ver}')
+
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as ge:
+              ge.write(f'MOD_ID={mod_id}\n')
+          "@
+
+          cd mod-index
+          git config user.name "sakevel"
+          git config user.email "223179818+sakevel@users.noreply.github.com"
+          $branch = "update-$($env:MOD_ID)-$($env:GITHUB_REF_NAME)-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+          git checkout -b $branch
+          git add index.json
+          git commit -m "chore(index): update mod $($env:MOD_ID) to $($env:GITHUB_REF_NAME)"
+          git push origin $branch
+          gh pr create --title "chore(index): update mod $($env:MOD_ID) to $($env:GITHUB_REF_NAME)" --body "Automated release publish from $($env:GITHUB_REPOSITORY)." --base main --head $branch
