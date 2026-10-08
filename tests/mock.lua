@@ -460,6 +460,7 @@ function MOCK.countUpdates() local n=0;for _ in pairs(MOCK.updates) do n=n+1 end
 function MOCK.newCharacter()
     local rootGo=go('ORIGINAL_CHARACTER')
     -- Root layer template check
+    rootGo.layer=8;rootGo.scene={handle=9}
     local root={transform=rootGo.transform,gameObject=rootGo}
     local rig={pelvis=transform(root.transform,v(0,0.98,0))}
     rig.spine={[0]=transform(rig.pelvis,v(0,0.25,0)),Length=1}

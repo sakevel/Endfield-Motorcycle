@@ -32,8 +32,18 @@ try:
         data=base64.b64decode(s,validate=True)
         return data # Actual XLua byte[] return is a binary Lua string, no Length property.
     lua.globals().mock_decode_asset=decode
+    # Exercise the production virtual asset route, not an inlined substitute.
+    asset_source='return {mesh="'+base64.b64encode((root/'mod/assets/sidra-bike.zmlmesh').read_bytes()).decode()+'",texture="'+base64.b64encode((root/'mod/assets/Textures.png').read_bytes()).decode()+'"}'
+    if args.patched:
+        asset_source=Path(args.patched+'.assets.lua').read_text(encoding='utf8')
+    def load_route(_,path):
+        return asset_source if path=='ZML/Mod/motorcycle/assets' else route(_,path)
+    lua.globals().native_route=load_route
+    returned_assets=lua.execute(asset_source)
+    assert base64.b64decode(returned_assets['mesh'],validate=True)==(root/'mod/assets/sidra-bike.zmlmesh').read_bytes()
+    assert base64.b64decode(returned_assets['texture'],validate=True)==(root/'mod/assets/Textures.png').read_bytes()
     helper=(root/'mod/motorcycle.lua').read_text(encoding='utf8')
-    asset_data='local BIKE_MESH_BASE64="'+base64.b64encode((root/'mod/assets/sidra-bike.zmlmesh').read_bytes()).decode()+'"\nlocal BIKE_TEXTURE_BASE64="'+base64.b64encode((root/'mod/assets/Textures.png').read_bytes()).decode()+'"'
+    asset_data='local BIKE_ASSETS=assert(loadstring(LuaManagerInst:LoadLua("ZML/Mod/motorcycle/assets"),"@ZML/Mod/motorcycle/assets"))()\nlocal BIKE_MESH_BASE64=BIKE_ASSETS.mesh\nlocal BIKE_TEXTURE_BASE64=BIKE_ASSETS.texture'
     helper=helper.replace('-- ZML_ASSET_DATA',asset_data)
     helper=helper.replace('-- ZML_VEHICLE_FLIGHT',(root/'mod/flight.lua').read_text(encoding='utf8'))
     helper=helper.replace('-- ZML_NATIVE_ACTIONS',(root/'mod/native-actions.lua').read_text(encoding='utf8'))

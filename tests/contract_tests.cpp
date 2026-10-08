@@ -1,4 +1,5 @@
 #include "zml_plugin.h"
+#include "zml_lua_service.h"
 #include "patch.hpp"
 #include "owned_lua.hpp"
 #include "model_asset.hpp"
@@ -47,13 +48,17 @@ int main(int argc,char** argv){
         expect(motorcycle::compactOwnedLua("local x='--ok' --gone\nlocal y=[=[--preserve\n]=] --tail\n") ==
             "local x='--ok'  \nlocal y=[=[--preserve\n]=]  \n", "compact preserves quoted/long strings and lines");
         expect(motorcycle::compactOwnedLua("return 1--[=[hidden\ntext]=]+2") == "return 1 \n+2", "compact separates long comment tokens");
-        expect(argc==2 || argc==4 || argc==6,"usage: ContractTests <DLL> [battle.lua battle-output.lua [ability.lua ability-output.lua]]");
+        expect(argc==3 || argc==5 || argc==7,"usage: ContractTests <DLL> <service fixture DLL> [battle.lua battle-output.lua [ability.lua ability-output.lua]]");
         auto dll=std::filesystem::absolute(argv[1]);
         auto module=LoadLibraryW(dll.c_str());expect(module!=nullptr,"actual DLL load");
         auto entry=reinterpret_cast<ZmlPluginEntry>(GetProcAddress(module,"ZML_PluginV1"));expect(entry!=nullptr,"ABI export");
         auto plugin=entry();expect(plugin && plugin->size==sizeof(ZmlPlugin) && plugin->abi==1 && std::string_view(plugin->id)=="motorcycle","plugin identity");
         auto directory=dll.parent_path().u8string();
         ZmlHost host{sizeof(ZmlHost),1,nullptr,reinterpret_cast<const char*>(directory.c_str()),"",log,registerLua};
+        expect(plugin->start(&host)==0 && registrations==0,"missing source service refuses before transforms");
+        auto runtime=LoadLibraryW(std::filesystem::absolute(argv[2]).c_str());expect(runtime!=nullptr,"public source service fixture");
+        auto testSource=reinterpret_cast<ZmlLuaSource (*)(void**)>(GetProcAddress(runtime,"ZML_TestSource"));
+        expect(testSource!=nullptr,"source fixture export");
         const auto asset=read(dll.parent_path()/L"assets/sidra-bike.zmlmesh");
         expect(motorcycle::validMesh(asset)&&motorcycle::sha256(asset)==motorcycle::meshHash,"actual asset integrity");
         for(auto n:{0u,8u,12u,80u,1000u})expect(!motorcycle::validMesh(std::string_view(asset).substr(0,n)),"truncated asset rejected");
@@ -66,6 +71,16 @@ int main(int argc,char** argv){
         expect(plugin->start(&missingHost)==0&&registrations==0,"missing runtime assets refuse before registration");
         expect(plugin->start(nullptr)==0,"reject null host");auto wrong=host;wrong.abi=2;expect(plugin->start(&wrong)==0,"reject ABI drift");
         expect(plugin->start(&host)==1 && registrations==2 && registered && wheelRegistered,"actual plugin registration");
+        void* sourceData{};auto provider=testSource(&sourceData);expect(provider!=nullptr,"asset provider registered");
+        sinks=0;expect(provider(sourceData,"assets",sink,nullptr)==1 && sinks==1,"one owned asset source sink");
+        auto assetSource=output;
+        expect(assetSource=="return {mesh=\""+motorcycle::base64(asset)+"\",texture=\""+
+            motorcycle::base64(read(dll.parent_path()/L"assets/Textures.png"))+"\"}\n","asset module exact checked mesh and texture");
+        expect(assetSource.size()<=768*1024,"asset module within unchanged public cap");
+        for(auto path:{"", "../assets", "assets/other", "other", "ZML/Mod/other/assets"}) {
+            sinks=0;expect(provider(sourceData,path,sink,nullptr)==0 && sinks==0,"unknown asset route refused without sink");
+        }
+        expect(provider(sourceData,nullptr,sink,nullptr)==0 && provider(sourceData,"assets",nullptr,nullptr)==0,"null asset arguments refused");
         auto temp=dll.parent_path().parent_path().parent_path()/L"asset-test-fixture";
         expect(!std::filesystem::exists(temp),"exclusive asset fixture");
         std::filesystem::create_directories(temp/L"assets");
@@ -81,10 +96,15 @@ int main(int argc,char** argv){
         const std::string source(fixture);
         sinks=0;expect(registered(data,source.data(),source.size(),sink,nullptr)==1 && sinks==1,"one atomic sink");
         expect(output.find("local ZMLMotorcycle")<output.find("BattleActionCtrl.OnShow"),"helper lexical scope");
-        expect(output.size()<=768*1024&&output.find("local BIKE_MESH_BASE64=")!=output.npos,"assets fit unchanged public source cap");
+        expect(output.size()<128*1024&&output.find("local BIKE_MESH_BASE64=BIKE_ASSETS.mesh")!=output.npos,"controller uses independent asset source with composition headroom");
+        expect(output.find(motorcycle::base64(asset))==output.npos,"no large mesh embedded in shared controller");
         expect(output.find("nativeShow(self)")!=output.npos && output.find("nativeHide(self)")!=output.npos && output.find("nativeClose(self)")!=output.npos,"preserve native lifecycle");
         std::string untouched;
         expect(!motorcycle::patch(output,"return {}",untouched) && untouched.empty(),"idempotent contract");
+        auto crowded=source+"\n-- other Mod payload\n"+std::string(384*1024,' ');
+        sinks=0;expect(registered(data,crowded.data(),crowded.size(),sink,nullptr)==1 && sinks==1 && output.size()<512*1024,"shared controller leaves room for other Mods");
+        auto oversized=source+std::string(768*1024,' ');
+        sinks=0;expect(registered(data,oversized.data(),oversized.size(),sink,nullptr)==0 && sinks==0,"source cap still enforced");
         for (auto anchor : {"BattleActionCtrl.OnShow = HL.Override() << function(self)","BattleActionCtrl.OnHide = HL.Override() << function(self)","BattleActionCtrl.OnClose = HL.Override() << function(self)","HL.Commit(BattleActionCtrl)"}) {
             auto missing=source;missing.erase(missing.find(anchor),strlen(anchor));
             sinks=0;expect(registered(data,missing.data(),missing.size(),sink,nullptr)==0 && sinks==0,"missing anchor atomic refusal");
@@ -93,10 +113,14 @@ int main(int argc,char** argv){
         }
         sinks=0;expect(registered(data,nullptr,0,sink,nullptr)==0 && sinks==0,"null source");
         auto binary=source;binary[1]='\0';expect(registered(data,binary.data(),binary.size(),sink,nullptr)==0,"reject binary");
-        if(argc>=4){
-            auto real=read(argv[2]);sinks=0;expect(registered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current client patch");
-            expect(!std::filesystem::exists(argv[3]),"do not overwrite research outputs");
-            std::ofstream file(argv[3],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write research output");
+        if(argc>=5){
+            auto real=read(argv[3]);sinks=0;expect(registered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current client patch");
+            expect(!std::filesystem::exists(argv[4]),"do not overwrite research outputs");
+            std::ofstream file(argv[4],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write research output");
+            auto assetsPath=std::filesystem::path(argv[4]);assetsPath+=".assets.lua";
+            expect(!std::filesystem::exists(assetsPath),"exclusive asset module output");
+            std::ofstream assetsFile(assetsPath,std::ios::binary);assetsFile.write(assetSource.data(),assetSource.size());
+            assetsFile.close();expect(static_cast<bool>(assetsFile),"write provider output");
         }
         const std::string wheelSource=R"(GeneralAbilityCtrl = HL.Class('GeneralAbilityCtrl', uiCtrl.UICtrl)
 GeneralAbilityCtrl._UpdateNormalAbilityData = HL.Method() << function(self)
@@ -137,10 +161,10 @@ HL.Commit(GeneralAbilityCtrl)
             auto duplicate=wheelSource+"\n"+anchor;
             expect(wheelRegistered(data,duplicate.data(),duplicate.size(),sink,nullptr)==0 && sinks==0,"wheel duplicate anchor atomic refusal");
         }
-        if(argc==6){
-            auto real=read(argv[4]);sinks=0;expect(wheelRegistered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current native R wheel patch");
-            expect(!std::filesystem::exists(argv[5]),"exclusive wheel output");
-            std::ofstream file(argv[5],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write wheel output");
+        if(argc==7){
+            auto real=read(argv[5]);sinks=0;expect(wheelRegistered(data,real.data(),real.size(),sink,nullptr)==1 && sinks==1,"actual current native R wheel patch");
+            expect(!std::filesystem::exists(argv[6]),"exclusive wheel output");
+            std::ofstream file(argv[6],std::ios::binary);file.write(output.data(),output.size());file.close();expect(static_cast<bool>(file),"write wheel output");
         }
         // Retain registered plugin for test lifetime
         std::cout<<"PASS: actual ABI1 DLL, lifecycle contract, atomic failure, lexical scope\n";
