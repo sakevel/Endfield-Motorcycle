@@ -26,6 +26,7 @@ function W.release(ctrl)
     W.sprite,W.texture,W.owner=nil,nil,nil
 end
 function W.register(ctrl)
+    W.owner=ctrl
     local list,map=ctrl.m_abilityDataList,ctrl.m_abilityDataMap
     if not list or not map then return end
     map[W.id]=nil
@@ -107,4 +108,5 @@ function W.hover(ctrl,type)
     ctrl.view.middleStateCtrl:SetState(enabled and "SelectState" or "DisableState")
     return true
 end
+local m=bridge();if m then m.wheelAdapter=W end
 return W

@@ -25,6 +25,11 @@ try:
     lua.execute('loadstring=load; LuaManagerInst={LoadLua=function(self,p)return native_route(self,p)end}')
     public=lua.execute(route(None,'ZML/Api'))
     lua.globals().PUBLIC=public
+    lua.execute("""BikeRuntimeActive=true;local original=PUBLIC.is_enabled
+        PUBLIC.is_enabled=function(id)if id=='motorcycle' then return BikeRuntimeActive end;return original(id)end
+        local register=PUBLIC.register_lifecycle
+        PUBLIC.register_lifecycle=function(id,h)if id=='motorcycle' then BikeLifecycle=h end;return register(id,h)end
+    """)
     lua.execute((root/'tests/mock.lua').read_text(encoding='utf8'))
     lua.globals().keybind_factory=lua.execute(Path(args.keybinds).read_text(encoding='utf8'))
     lua.execute((root/'tests/keybind_fixture.lua').read_text(encoding='utf8'))
@@ -76,6 +81,19 @@ try:
         lua.globals().native_source=lambda name: (Path(args.native_fixtures)/name).read_text(encoding='utf8')
         lua.globals().wheel_native_source=Path(args.wheel_patched).read_text(encoding='utf8')
         lua.execute((root/'tests/current_native.lua').read_text(encoding='utf8'))
+
+    lua.execute("""
+        assert(PUBLIC.set('motorcycle','enabled',true))
+        GameInstance.playerController.mainCharacter=MOCK.newCharacter()
+        local ctrl={isPCPanel=true}
+        BikeRuntimeActive=false;M.show(ctrl);assert(not M.wheelAvailable())
+        BikeRuntimeActive=true;assert(BikeLifecycle.prepare(true));BikeLifecycle.changed(true)
+        M.summon();M.finishPresentation();M.mount();assert(M.lease)
+        BikeRuntimeActive=false;BikeLifecycle.changed(false);MOCK.run('Tick');MOCK.run('Tick')
+        assert(not M.lease and not M.vehicle and not M.wheelAvailable())
+        BikeRuntimeActive=true;assert(BikeLifecycle.prepare(true));BikeLifecycle.changed(true)
+        assert(M.wheelAvailable());M.close(ctrl)
+    """)
     print('PASS: motorcycle production Lua, real services, rig/state/rollback/input/resource mock scenarios')
 finally:
     server.stdin.close()

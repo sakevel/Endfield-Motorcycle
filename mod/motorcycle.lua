@@ -77,7 +77,7 @@ local function api()
 end
 local function config()
     local v=assert(api().get(ID))
-    local c={enabled=v.enabled=="true",scale=tonumber(v.scale),speed=tonumber(v.speed),
+    local c={enabled=v.enabled=="true" and (not api().is_enabled or api().is_enabled(ID)),scale=tonumber(v.scale),speed=tonumber(v.speed),
         acceleration=tonumber(v.acceleration),max_steer=tonumber(v.max_steer),speed_steer_reduction=tonumber(v.speed_steer_reduction),seat_height=tonumber(v.seat_height),model_yaw=tonumber(v.model_yaw),
         }
     for _,key in ipairs({"terrain_grace","terrain_drop","jump_cooldown","jump_base_speed","jump_speed_boost","jump_pitch","jump_gravity","speed_fx_threshold","speed_fx_intensity","ride_fov","fov_blend"}) do
@@ -1246,6 +1246,7 @@ function M.show(ctrl)
     M.owner=ctrl
     M.lastOwner=ctrl
     removeUpdates()
+    if api().is_enabled and not api().is_enabled(ID) then return end
     local ok,err=pcall(function()
         ensureKeys()
         M.settings=config()
@@ -1285,6 +1286,21 @@ function M.close(ctrl)
     M.hide(ctrl);M.dismiss(true);M.requestedToggle=nil
     M.lastOwner=nil
     ensureCleanupUpdate()
+end
+local z=api()
+if z.register_lifecycle then
+    z.register_lifecycle(ID,{
+        prepare=function(on) return not on or (#M.pending==0 and not M.interactRemovalPending),'载具仍在恢复，请稍候' end,
+        changed=function(on)
+            local ctrl=M.owner
+            if on then if ctrl then M.show(ctrl) end
+            else
+                if ctrl then M.close(ctrl);M.owner=ctrl;M.lastOwner=ctrl else M.dismiss(true);ensureCleanupUpdate() end
+                M.settings=config()
+            end
+            if M.wheelAdapter and M.wheelAdapter.owner then M.wheelAdapter.refresh(M.wheelAdapter.owner) end
+        end
+    })
 end
 -- Module state bridge
 local bridgeName="ZML/Motorcycle"

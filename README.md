@@ -28,3 +28,7 @@
 
 - 依赖模组：[按键绑定 (Endfield-Keybinds)](https://github.com/sakevel/Endfield-Keybinds)
 - 3D 模型：基于 Sidra 创作的 *Low-Poly Motorcycle #2* 修改制作（遵循 [CC BY 4.0](mod/licenses/CC-BY-4.0.txt) 协议）。
+
+## 运行时启停
+
+支持游戏内热开关（需 ZML 0.5.0 及以上版本），可在启动器中直接切换启用状态。
